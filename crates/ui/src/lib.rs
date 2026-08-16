@@ -7,6 +7,7 @@
 
 pub mod changes;
 pub mod commit_list;
+pub mod conflicts;
 pub mod diff_view;
 pub mod login;
 pub mod settings;
@@ -151,6 +152,7 @@ pub fn build_window(
 
     // --- pages --------------------------------------------------------------
     let changes = changes::ChangesView::new(state.clone());
+    let conflicts = conflicts::ConflictView::new(state.clone());
 
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(&main_pane, Some("history"), "History", "view-list-symbolic");
@@ -160,6 +162,17 @@ pub fn build_window(
         "Changes",
         "document-edit-symbolic",
     );
+
+    // The Conflicts page exists only while a merge is stopped. A permanently
+    // visible tab that is empty nine times out of ten trains people to ignore
+    // it, which is the opposite of what it is for.
+    let conflicts_page = stack.add_titled_with_icon(
+        &conflicts.root,
+        Some("conflicts"),
+        "Conflicts",
+        "dialog-warning-symbolic",
+    );
+    conflicts_page.set_visible(false);
 
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
@@ -172,6 +185,7 @@ pub fn build_window(
     // a view nobody is looking at.
     {
         let changes = changes.clone();
+        let conflicts_ = conflicts.clone();
         let prefs = prefs.clone();
         stack.connect_visible_child_name_notify(move |s| {
             let Some(name) = s.visible_child_name() else {
@@ -180,8 +194,15 @@ pub fn build_window(
             if name == "changes" {
                 changes.refresh();
             }
-            if let Some(p) = &prefs {
-                p.set_string("last-page", &name).ok();
+            if name == "conflicts" {
+                conflicts_.refresh();
+            }
+            // Only the permanent pages are worth restoring — a Conflicts page
+            // saved here would be gone by the next launch.
+            if name != "conflicts" {
+                if let Some(p) = &prefs {
+                    p.set_string("last-page", &name).ok();
+                }
             }
         });
     }
@@ -226,6 +247,12 @@ pub fn build_window(
     // Hiding it too means a narrow window starts on the work, with the branch
     // list one button away.
     breakpoint.add_setter(&split, "show-sidebar", Some(&false.to_value()));
+    // Three columns of conflict text need real width; stack them instead.
+    breakpoint.add_setter(
+        &conflicts.sides,
+        "orientation",
+        Some(&gtk::Orientation::Vertical.to_value()),
+    );
 
     // Narrower still: the file list and the diff cannot share a row either, so
     // the Changes page stacks them.
@@ -238,6 +265,11 @@ pub fn build_window(
     narrow.add_setter(&split, "show-sidebar", Some(&false.to_value()));
     narrow.add_setter(
         &changes.paned,
+        "orientation",
+        Some(&gtk::Orientation::Vertical.to_value()),
+    );
+    narrow.add_setter(
+        &conflicts.sides,
         "orientation",
         Some(&gtk::Orientation::Vertical.to_value()),
     );
@@ -261,6 +293,9 @@ pub fn build_window(
         refs_list: refs_list.clone(),
         sidebar_title: sidebar_title.clone(),
         prefs: prefs.clone(),
+        stack: stack.clone(),
+        conflicts_page: conflicts_page.clone(),
+        conflicts: conflicts.clone(),
     };
 
     {
@@ -345,18 +380,39 @@ pub fn build_window(
     let startup = initial_repo
         .map(Path::to_path_buf)
         .or_else(|| settings::recent(prefs.as_ref()).into_iter().next());
+    {
+        let views_ = views.clone();
+        conflicts.connect_changed(Rc::new(move || {
+            // Concluding or aborting a merge moves HEAD, so history, refs and
+            // the conflicts page all have to catch up together.
+            if let Some(Some(path)) = views_
+                .state
+                .with(|s| s.repo.workdir().map(|p| p.to_path_buf()))
+            {
+                views_.load_repo(&path);
+            }
+        }));
+    }
+
+    // The remembered page is restored *before* the repository loads, not after.
+    //
+    // After was wrong: `load_repo` switches to the Conflicts page when a merge
+    // is stopped, and a restore running later silently put the user back on
+    // Changes with a conflict tab they had to notice for themselves. An
+    // in-progress conflict outranks a remembered preference.
+    if let Some(p) = &prefs {
+        stack.set_visible_child_name(&p.string("last-page"));
+    }
+
     if let Some(path) = startup {
         views.load_repo(&path);
     }
 
-    // Restore the page last open. After the repository loads, so the Changes
-    // page has status to show rather than rendering empty and then filling in.
-    if let Some(p) = &prefs {
-        let name = p.string("last-page");
-        stack.set_visible_child_name(&name);
-        if name == "changes" {
-            changes.refresh();
-        }
+    // Whatever page won, populate it — the stack's notify handler only fires on
+    // a *change*, so a page that was already current never refreshed.
+    match stack.visible_child_name().as_deref() {
+        Some("conflicts") => conflicts.refresh(),
+        _ => changes.refresh(),
     }
 
     {
@@ -405,9 +461,30 @@ struct Views {
     refs_list: gtk::ListBox,
     sidebar_title: adw::WindowTitle,
     prefs: Option<gtk::gio::Settings>,
+    stack: adw::ViewStack,
+    conflicts_page: adw::ViewStackPage,
+    conflicts: Rc<conflicts::ConflictView>,
 }
 
 impl Views {
+    /// Reveal the Conflicts page while a merge is stopped, hide it otherwise,
+    /// and jump to it the moment conflicts appear — a merge that stops with
+    /// conflicts is not something to leave the user to discover.
+    fn update_conflicts(&self) {
+        let conflicted = self.conflicts.has_conflicts();
+        let was_visible = self.conflicts_page.is_visible();
+
+        self.conflicts_page.set_visible(conflicted);
+        if conflicted {
+            self.conflicts.refresh();
+            if !was_visible {
+                self.stack.set_visible_child_name("conflicts");
+            }
+        } else if self.stack.visible_child_name().as_deref() == Some("conflicts") {
+            self.stack.set_visible_child_name("changes");
+        }
+    }
+
     /// Open a repository and populate every view that shows it.
     fn load_repo(&self, path: &Path) {
         self.model.clear();
@@ -423,6 +500,8 @@ impl Views {
         self.model.sync_length();
         populate_refs(&self.refs_list, &self.state);
         settings::push_recent(self.prefs.as_ref(), path);
+
+        self.update_conflicts();
 
         if let Some((name, branch)) = self.state.with(|s| s.name_and_branch()) {
             self.sidebar_title.set_title(&name);

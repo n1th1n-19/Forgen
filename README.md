@@ -33,7 +33,7 @@ RSS growth exceeds 64MB. Current measurement: **12MB**.
 
 ## Status
 
-R0 and R1 complete. 145 tests.
+R0 and R1 complete. 150 tests.
 
 **Engine — all tested against real repositories:**
 windowed history over large repositories · refs · working-tree status ·
@@ -48,12 +48,12 @@ HTTP revalidation cache · rate limiting.
 **UI:** History page with the windowed commit list · Changes page with
 staged/unstaged lists, an interactive diff pane supporting **hunk- and
 line-level staging, unstaging and discarding**, and a commit box · sync
-buttons with live progress · branch switching · responsive layout that
+buttons with live progress · branch switching · a three-way conflict
+resolver that appears only while a merge is stopped · responsive layout that
 collapses the sidebar and stacks the panes on a narrow window · session
 restore.
 
-**Engine-complete but not yet surfaced in the UI:** the three-way conflict
-resolver and stash management.
+**Engine-complete but not yet surfaced in the UI:** stash management.
 
 **Not built:** everything in R2–R5 — pull requests, issues, Actions,
 notifications, interactive rebase, worktrees, reflog, search, releases. See
@@ -163,7 +163,7 @@ for the keyring, and git itself is bundled as a module because
 ## Testing
 
 ```bash
-cargo test --workspace                       # 145 tests
+cargo test --workspace                       # 150 tests
 cargo test -p git -p auth -p db -p github    # 139 of them, no display server needed
 cargo test -p git --test memcheck --release  # the memory gate
 cargo test -p auth -- --ignored              # keyring round trip, needs a session bus
