@@ -1,0 +1,10 @@
+# Redirects cargo to the vendored crate tree for the Flatpak build.
+#
+# Installed into .cargo/config.toml inside the build directory only — not
+# committed at the repository root, so an ordinary `cargo build` keeps using
+# the registry and keeps seeing updates.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

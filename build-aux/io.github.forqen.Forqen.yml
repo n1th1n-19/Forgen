@@ -87,11 +87,24 @@ modules:
     buildsystem: meson
     config-opts:
       - -Dprofile=release
+    # The build sandbox has no network. Without vendored crates cargo tries to
+    # reach index.crates.io and dies with "Could not resolve host" — which is
+    # also exactly what Flathub's builders do, so this is not optional there
+    # either.
+    #
+    # Regenerate after any dependency change:
+    #   cargo vendor --versioned-dirs vendor
+    build-options:
+      env:
+        CARGO_NET_OFFLINE: 'true'
+        CARGO_HOME: /run/build/forqen/cargo
     sources:
       - type: dir
         path: ..
-    # Vendored so the build is offline, which flathub requires.
-    # Regenerate with: cargo vendor && tar czf cargo-vendor.tar.gz vendor
-    # build-options:
-    #   env:
-    #     CARGO_NET_OFFLINE: 'true'
+      # Points cargo at the vendored tree. Written into the build directory
+      # rather than committed, so a normal `cargo build` outside Flatpak still
+      # uses the registry and picks up updates.
+      - type: file
+        path: cargo-config.toml
+        dest: .cargo
+        dest-filename: config.toml
