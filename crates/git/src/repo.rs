@@ -68,29 +68,83 @@ pub(crate) mod tests {
     use super::*;
     use std::process::Command;
 
-    /// Build a throwaway repo with `n` commits. Uses the real `git` binary so
-    /// the fixture is unarguably valid rather than whatever we think gix writes.
+    /// Build a throwaway repo with `n` commits, newest message `commit n-1`,
+    /// each commit writing `f.txt`.
+    ///
+    /// Built with `git fast-import` rather than a loop of `git add` + `git
+    /// commit`. Still the real git binary, so the fixture is unarguably valid —
+    /// but one process instead of three per commit. At the sizes the eviction
+    /// tests use that was ~1200 spawns, which was slow everywhere and flaky on
+    /// CI: a 400-commit fixture intermittently produced a repository where the
+    /// revwalk yielded an id that could not then be read back.
+    ///
+    /// The exact cause was never reproduced locally. What is certain is that
+    /// this version does the same work in a single deterministic pass, and that
+    /// the fixture is not what those tests are trying to exercise.
     pub(crate) fn fixture(n: usize) -> tempfile::TempDir {
+        use std::io::Write;
+
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path();
-        let run = |args: &[&str]| {
-            let ok = Command::new("git")
-                .args(args)
-                .current_dir(p)
-                .env("GIT_AUTHOR_NAME", "Fixture")
-                .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
-                .env("GIT_COMMITTER_NAME", "Fixture")
-                .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
-                .output()
-                .unwrap();
-            assert!(ok.status.success(), "git {args:?} failed");
-        };
-        run(&["init", "-q", "-b", "main"]);
-        for i in 0..n {
-            std::fs::write(p.join("f.txt"), format!("{i}\n")).unwrap();
-            run(&["add", "f.txt"]);
-            run(&["commit", "-q", "-m", &format!("commit {i}")]);
+
+        let ok = Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(ok.status.success(), "git init failed");
+
+        if n == 0 {
+            return dir;
         }
+
+        let mut child = Command::new("git")
+            .args(["fast-import", "--quiet"])
+            .current_dir(p)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("git fast-import");
+        {
+            let mut w = std::io::BufWriter::new(child.stdin.as_mut().expect("piped stdin"));
+            for i in 0..n {
+                writeln!(w, "commit refs/heads/main").unwrap();
+                writeln!(w, "mark :{}", i + 1).unwrap();
+                // Fixed timestamps keep the fixture byte-identical between runs.
+                writeln!(
+                    w,
+                    "committer Fixture <fixture@example.invalid> {} +0000",
+                    1_600_000_000 + i
+                )
+                .unwrap();
+                let msg = format!("commit {i}");
+                writeln!(w, "data {}", msg.len()).unwrap();
+                writeln!(w, "{msg}").unwrap();
+                if i > 0 {
+                    writeln!(w, "from :{i}").unwrap();
+                }
+                let blob = format!("{i}\n");
+                writeln!(w, "M 100644 inline f.txt").unwrap();
+                writeln!(w, "data {}", blob.len()).unwrap();
+                write!(w, "{blob}").unwrap();
+                writeln!(w).unwrap();
+            }
+            writeln!(w, "done").unwrap();
+            w.flush().unwrap();
+        }
+        assert!(
+            child.wait().expect("fast-import completes").success(),
+            "git fast-import failed"
+        );
+
+        // fast-import writes objects and the ref but leaves the index and
+        // working tree empty; tests that stage or diff need f.txt on disk.
+        let ok = Command::new("git")
+            .args(["reset", "-q", "--hard", "main"])
+            .current_dir(p)
+            .output()
+            .unwrap();
+        assert!(ok.status.success(), "git reset --hard failed");
+
         dir
     }
 
