@@ -6,21 +6,44 @@
 //! match — get either wrong and git rejects the patch, or worse, accepts a
 //! patch that stages something the user did not pick.
 //!
-//! The rules, which the tests below pin:
+//! The rules depend on **which file the patch will be applied to**, and getting
+//! this backwards produces `patch does not apply` at best and a silently wrong
+//! result at worst.
 //!
-//! * An unselected **addition** did not exist in the index, so it must vanish
+//! Against the **index** (`git apply --cached`, for staging and unstaging):
+//!
+//! * An unselected **addition** does not exist in the index, so it must vanish
 //!   from the patch entirely. Leaving it as context claims a line is present
 //!   that is not.
 //! * An unselected **removal** is still present in the index, so it becomes a
 //!   context line. Dropping it would shift every following line.
-//! * `old_count` is the context plus removals; `new_count` is the context plus
-//!   additions. Both are recounted after filtering, never carried over.
+//!
+//! Against the **working tree** (`git apply -R`, for discarding), the two rules
+//! swap, because the working tree is the diff's post-image rather than its
+//! pre-image: unselected additions *are* present and become context, unselected
+//! removals are *not* and must be omitted.
+//!
+//! Either way `old_count` is context plus removals and `new_count` is context
+//! plus additions, both recounted after filtering and never carried over.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
 
 use crate::diff::{DiffLine, FileDiff, Hunk, LineKind};
 use crate::{GitError, Repo};
+
+/// Which file the synthesized patch will be applied to.
+///
+/// Determines how *unselected* changes are rendered — see the module docs. The
+/// two targets are mirror images, and using the wrong one makes `git apply`
+/// reject the patch outright.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PatchTarget {
+    /// `git apply --cached`: the index is the diff's pre-image.
+    Index,
+    /// `git apply -R` with no `--cached`: the working tree is the post-image.
+    Worktree,
+}
 
 /// Stage every change in a path.
 pub fn stage_file(repo: &Repo, path: &str) -> Result<(), GitError> {
@@ -47,7 +70,7 @@ pub fn discard_file(repo: &Repo, path: &str) -> Result<(), GitError> {
 /// shape of `file.hunks[..].lines[..]`. A `false` for a context line is
 /// meaningless and ignored — context is always emitted.
 pub fn stage_lines(repo: &Repo, file: &FileDiff, selected: &[Vec<bool>]) -> Result<(), GitError> {
-    let patch = build_patch(file, selected)?;
+    let patch = build_patch(file, selected, PatchTarget::Index)?;
     if patch.is_empty() {
         return Ok(());
     }
@@ -63,7 +86,7 @@ pub fn stage_lines(repo: &Repo, file: &FileDiff, selected: &[Vec<bool>]) -> Resu
 /// The same patch applied in reverse. `--cached -R` moves the change out of the
 /// index without touching the working tree.
 pub fn unstage_lines(repo: &Repo, file: &FileDiff, selected: &[Vec<bool>]) -> Result<(), GitError> {
-    let patch = build_patch(file, selected)?;
+    let patch = build_patch(file, selected, PatchTarget::Index)?;
     if patch.is_empty() {
         return Ok(());
     }
@@ -72,6 +95,24 @@ pub fn unstage_lines(repo: &Repo, file: &FileDiff, selected: &[Vec<bool>]) -> Re
         &["apply", "--cached", "-R", "--unidiff-zero", "-"],
         Some(&patch),
     )
+}
+
+/// Discard exactly the selected lines from the **working tree**.
+///
+/// Distinct from [`unstage_lines`], which moves changes out of the index and
+/// leaves the file alone. This reverse-applies the patch to the file itself,
+/// so the edits are gone — they were never committed, so nothing can recover
+/// them. Callers must confirm first.
+pub fn discard_lines(repo: &Repo, file: &FileDiff, selected: &[Vec<bool>]) -> Result<(), GitError> {
+    // Worktree, not Index: the file being patched is the diff's post-image, so
+    // unselected additions must appear as context and unselected removals must
+    // be omitted — the exact opposite of the staging path.
+    let patch = build_patch(file, selected, PatchTarget::Worktree)?;
+    if patch.is_empty() {
+        return Ok(());
+    }
+    // No `--cached`: this applies to the working tree, not the index.
+    run_git(repo, &["apply", "-R", "--unidiff-zero", "-"], Some(&patch))
 }
 
 /// Stage one whole hunk.
@@ -96,7 +137,11 @@ fn select_only_hunk(file: &FileDiff, hunk_index: usize) -> Vec<Vec<bool>> {
 /// Returns an empty string when nothing is selected, which callers treat as a
 /// no-op rather than as an error — a click that selects nothing should do
 /// nothing, not raise.
-pub fn build_patch(file: &FileDiff, selected: &[Vec<bool>]) -> Result<String, GitError> {
+pub fn build_patch(
+    file: &FileDiff,
+    selected: &[Vec<bool>],
+    target: PatchTarget,
+) -> Result<String, GitError> {
     if file.is_binary {
         return Err(GitError::Object(format!(
             "{} is binary; stage the whole file instead",
@@ -107,7 +152,7 @@ pub fn build_patch(file: &FileDiff, selected: &[Vec<bool>]) -> Result<String, Gi
     let mut hunks = String::new();
     for (i, hunk) in file.hunks.iter().enumerate() {
         let picks = selected.get(i).map(Vec::as_slice).unwrap_or(&[]);
-        if let Some(rendered) = filter_hunk(hunk, picks) {
+        if let Some(rendered) = filter_hunk(hunk, picks, target) {
             hunks.push_str(&rendered);
         }
     }
@@ -132,7 +177,7 @@ pub fn build_patch(file: &FileDiff, selected: &[Vec<bool>]) -> Result<String, Gi
 }
 
 /// Render one hunk with only the selected changes, or `None` if it holds none.
-fn filter_hunk(hunk: &Hunk, selected: &[bool]) -> Option<String> {
+fn filter_hunk(hunk: &Hunk, selected: &[bool], target: PatchTarget) -> Option<String> {
     let mut kept: Vec<DiffLine> = Vec::with_capacity(hunk.lines.len());
     let mut any_change = false;
 
@@ -144,19 +189,31 @@ fn filter_hunk(hunk: &Hunk, selected: &[bool]) -> Option<String> {
                 any_change = true;
                 kept.push(line.clone());
             }
-            // Not staging this addition: the index does not contain the line at
-            // all, so it must be absent from the patch — not demoted to context.
-            LineKind::Added => {}
+            // Unselected addition. Absent from the index, present in the
+            // working tree — so omit it for one target and demote it to context
+            // for the other.
+            LineKind::Added => {
+                if target == PatchTarget::Worktree {
+                    kept.push(DiffLine {
+                        kind: LineKind::Context,
+                        ..line.clone()
+                    });
+                }
+            }
             LineKind::Removed if picked => {
                 any_change = true;
                 kept.push(line.clone());
             }
-            // Not staging this removal: the line is still in the index, so it
-            // becomes context. Dropping it would misalign everything after.
-            LineKind::Removed => kept.push(DiffLine {
-                kind: LineKind::Context,
-                ..line.clone()
-            }),
+            // Unselected removal. Still in the index, already gone from the
+            // working tree — the mirror of the case above.
+            LineKind::Removed => {
+                if target == PatchTarget::Index {
+                    kept.push(DiffLine {
+                        kind: LineKind::Context,
+                        ..line.clone()
+                    });
+                }
+            }
             // Only meaningful when attached to a line that survived.
             LineKind::NoNewline => {
                 if kept.last().is_some_and(DiffLine::is_change) {
@@ -358,6 +415,54 @@ mod tests {
     }
 
     #[test]
+    fn discarding_lines_removes_them_from_the_working_tree() {
+        let (_d, repo) = five_lines();
+        // Two independent edits.
+        write(&repo, "f.txt", "ONE\ntwo\nthree\nfour\nFIVE\n");
+
+        let files = diff::diff(&repo, DiffSource::Unstaged, None).unwrap();
+        let f = &files[0];
+
+        // Discard only the first change.
+        let mut selected: Vec<Vec<bool>> =
+            f.hunks.iter().map(|h| vec![false; h.lines.len()]).collect();
+        for (i, l) in f.hunks[0].lines.iter().enumerate() {
+            if l.text == "one" || l.text == "ONE" {
+                selected[0][i] = true;
+            }
+        }
+
+        discard_lines(&repo, f, &selected).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.workdir().unwrap().join("f.txt")).unwrap(),
+            "one\ntwo\nthree\nfour\nFIVE\n",
+            "only the selected edit should be reverted; the other must survive"
+        );
+    }
+
+    #[test]
+    fn discarding_leaves_the_index_alone() {
+        let (_d, repo) = five_lines();
+        write(&repo, "f.txt", "STAGED\ntwo\nthree\nfour\nfive\n");
+        stage_file(&repo, "f.txt").unwrap();
+        // Further unstaged edit on top of the staged one.
+        write(&repo, "f.txt", "STAGED\ntwo\nthree\nfour\nWORKTREE\n");
+
+        let files = diff::diff(&repo, DiffSource::Unstaged, None).unwrap();
+        let f = &files[0];
+        let selected: Vec<Vec<bool>> = f.hunks.iter().map(|h| vec![true; h.lines.len()]).collect();
+
+        discard_lines(&repo, f, &selected).unwrap();
+
+        assert_eq!(
+            read_index(&repo, "f.txt"),
+            "STAGED\ntwo\nthree\nfour\nfive\n",
+            "discarding a worktree change must not disturb what is staged"
+        );
+    }
+
+    #[test]
     fn unstaging_a_hunk_reverses_it() {
         let (_d, repo) = five_lines();
         write(&repo, "f.txt", "ONE\ntwo\nthree\nfour\nfive\n");
@@ -397,7 +502,7 @@ index 1..2 100644
         let f = sample();
         // Select the removal only.
         let selected = vec![vec![false, true, false, false]];
-        let patch = build_patch(&f, &selected).unwrap();
+        let patch = build_patch(&f, &selected, PatchTarget::Index).unwrap();
 
         assert!(
             !patch.contains("add me"),
@@ -414,7 +519,7 @@ index 1..2 100644
         let f = sample();
         // Select the addition only.
         let selected = vec![vec![false, false, true, false]];
-        let patch = build_patch(&f, &selected).unwrap();
+        let patch = build_patch(&f, &selected, PatchTarget::Index).unwrap();
 
         assert!(
             patch.contains(" drop me"),
@@ -426,11 +531,52 @@ index 1..2 100644
         assert!(patch.contains("@@ -1,3 +1,4 @@"), "{patch}");
     }
 
+    /// The two targets are mirror images. Rendering the same selection for the
+    /// wrong one is what produced `patch does not apply` when discard was first
+    /// written against the staging patch.
+    #[test]
+    fn worktree_target_mirrors_the_index_rules() {
+        let f = sample();
+        // Select the removal only, leaving the addition unselected.
+        let selected = vec![vec![false, true, false, false]];
+
+        let index = build_patch(&f, &selected, PatchTarget::Index).unwrap();
+        let worktree = build_patch(&f, &selected, PatchTarget::Worktree).unwrap();
+
+        // Index: the unselected addition is not in the index, so it is omitted.
+        assert!(!index.contains("add me"), "index patch:\n{index}");
+        // Worktree: the unselected addition *is* in the file, so it is context.
+        assert!(
+            worktree.contains(" add me"),
+            "worktree patch must carry it as context:\n{worktree}"
+        );
+
+        // Counts follow. Index: context 2 + removal 1 = 3 old, 2 new.
+        assert!(index.contains("@@ -1,3 +1,2 @@"), "{index}");
+        // Worktree: context 3 + removal 1 = 4 old, context 3 new.
+        assert!(worktree.contains("@@ -1,4 +1,3 @@"), "{worktree}");
+    }
+
+    #[test]
+    fn worktree_target_omits_unselected_removals() {
+        let f = sample();
+        // Select the addition only.
+        let selected = vec![vec![false, false, true, false]];
+        let worktree = build_patch(&f, &selected, PatchTarget::Worktree).unwrap();
+
+        assert!(
+            !worktree.contains("drop me"),
+            "an unselected removal is already gone from the working tree, so it \
+             must not appear at all:\n{worktree}"
+        );
+        assert!(worktree.contains("+add me"), "{worktree}");
+    }
+
     #[test]
     fn selecting_nothing_yields_an_empty_patch_not_an_error() {
         let f = sample();
         let selected = vec![vec![false; 4]];
-        assert_eq!(build_patch(&f, &selected).unwrap(), "");
+        assert_eq!(build_patch(&f, &selected, PatchTarget::Index).unwrap(), "");
     }
 
     #[test]
@@ -445,7 +591,7 @@ index 1..2 100644
         });
 
         let selected = vec![vec![false; 4], vec![false, true, true, false]];
-        let patch = build_patch(&f, &selected).unwrap();
+        let patch = build_patch(&f, &selected, PatchTarget::Index).unwrap();
 
         assert_eq!(
             patch.matches("@@ ").count(),
@@ -459,7 +605,7 @@ index 1..2 100644
     fn the_patch_carries_the_original_header_verbatim() {
         let f = sample();
         let selected = vec![vec![false, true, true, false]];
-        let patch = build_patch(&f, &selected).unwrap();
+        let patch = build_patch(&f, &selected, PatchTarget::Index).unwrap();
 
         assert!(patch.starts_with("diff --git a/f.txt b/f.txt\n"));
         assert!(
@@ -480,7 +626,7 @@ Binary files a/x.png and b/x.png differ
         )
         .remove(0);
 
-        let err = build_patch(&f, &[]).unwrap_err();
+        let err = build_patch(&f, &[], PatchTarget::Index).unwrap_err();
         assert!(err.to_string().contains("binary"), "{err}");
     }
 }

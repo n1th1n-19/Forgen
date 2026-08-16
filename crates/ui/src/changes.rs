@@ -10,12 +10,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use sourceview::prelude::*;
 
 use git::diff::{self, DiffSource, FileDiff};
+use git::stage::discard_lines;
 use git::status::{self, StatusEntry};
 use git::{commit, stage};
 
+use crate::diff_view::DiffView;
 use crate::state::AppState;
 
 /// Which side of the index a row belongs to.
@@ -25,13 +26,27 @@ enum Side {
     Unstaged,
 }
 
+/// What the selection buttons do with the selected lines.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectionAction {
+    /// Move between the working tree and the index, in whichever direction the
+    /// currently shown side implies.
+    Move,
+    /// Revert them in the working tree. Unrecoverable.
+    Discard,
+}
+
 pub struct ChangesView {
     pub root: gtk::Widget,
+    /// Exposed so a window breakpoint can stack the panes on a narrow window.
+    pub paned: gtk::Paned,
     state: AppState,
     staged_list: gtk::ListBox,
     unstaged_list: gtk::ListBox,
-    diff_buffer: sourceview::Buffer,
+    diff: Rc<DiffView>,
     diff_title: gtk::Label,
+    stage_sel_btn: gtk::Button,
+    discard_sel_btn: gtk::Button,
     message: gtk::TextView,
     commit_btn: gtk::Button,
     amend: gtk::CheckButton,
@@ -45,32 +60,7 @@ impl ChangesView {
         let staged_list = file_list();
         let unstaged_list = file_list();
 
-        // The `diff` language ships with GtkSourceView, so hunk headers,
-        // additions and removals are coloured by the user's chosen scheme
-        // rather than by colours hardcoded here that would fight their theme.
-        let diff_buffer = sourceview::Buffer::new(None);
-        if let Some(lang) = sourceview::LanguageManager::default().language("diff") {
-            diff_buffer.set_language(Some(&lang));
-        }
-        diff_buffer.set_highlight_syntax(true);
-
-        // GtkSourceView does not follow libadwaita's dark mode: its default
-        // scheme is light, so the diff pane renders as a white slab inside a
-        // dark window. The scheme has to be selected explicitly and re-selected
-        // whenever the system preference flips.
-        apply_style_scheme(&diff_buffer);
-        {
-            let buffer = diff_buffer.clone();
-            adw::StyleManager::default().connect_dark_notify(move |_| {
-                apply_style_scheme(&buffer);
-            });
-        }
-
-        let diff_view = sourceview::View::with_buffer(&diff_buffer);
-        diff_view.set_editable(false);
-        diff_view.set_monospace(true);
-        diff_view.set_show_line_numbers(false);
-        diff_view.set_cursor_visible(false);
+        let diff = DiffView::new();
 
         let diff_title = gtk::Label::new(Some("Select a file"));
         diff_title.set_xalign(0.0);
@@ -96,22 +86,38 @@ impl ChangesView {
         summary.set_xalign(0.0);
         summary.add_css_class("dim-label");
 
+        // Label says "Stage" or "Unstage" depending on which side is shown —
+        // the same selection means opposite things on the two lists, and one
+        // ambiguous verb would make it a coin flip.
+        let stage_sel_btn = gtk::Button::with_label("Stage");
+        stage_sel_btn.set_sensitive(false);
+        let discard_sel_btn = gtk::Button::with_label("Discard");
+        discard_sel_btn.add_css_class("destructive-action");
+        discard_sel_btn.set_sensitive(false);
+
+        let paned = build_layout(
+            &staged_list,
+            &unstaged_list,
+            &diff.root,
+            &diff_title,
+            &stage_sel_btn,
+            &discard_sel_btn,
+            &message,
+            &commit_btn,
+            &amend,
+            &summary,
+        );
+
         let view = Rc::new(Self {
-            root: build_layout(
-                &staged_list,
-                &unstaged_list,
-                &diff_view,
-                &diff_title,
-                &message,
-                &commit_btn,
-                &amend,
-                &summary,
-            ),
+            root: paned.clone().upcast(),
+            paned,
             state,
             staged_list,
             unstaged_list,
-            diff_buffer,
+            diff,
             diff_title,
+            stage_sel_btn,
+            discard_sel_btn,
             message,
             commit_btn,
             amend,
@@ -141,6 +147,88 @@ impl ChangesView {
         {
             let this = self.clone();
             self.commit_btn.connect_clicked(move |_| this.do_commit());
+        }
+
+        // Selection drives the staging buttons.
+        {
+            let this = self.clone();
+            self.diff.connect_selection_changed(move || {
+                let has = this.diff.has_selection();
+                this.stage_sel_btn.set_sensitive(has);
+                // Discarding only makes sense for unstaged work; the staged
+                // side's inverse is unstaging, which the same button does.
+                let unstaged = matches!(
+                    this.shown.borrow().as_ref(),
+                    Some((Side::Unstaged, _)) | None
+                );
+                this.discard_sel_btn.set_sensitive(has && unstaged);
+            });
+        }
+        {
+            let this = self.clone();
+            self.stage_sel_btn
+                .connect_clicked(move |_| this.apply_selection(SelectionAction::Move));
+        }
+        {
+            let this = self.clone();
+            self.discard_sel_btn
+                .connect_clicked(move |_| this.confirm_discard());
+        }
+    }
+
+    /// Stage or unstage exactly what is selected in the diff pane.
+    fn apply_selection(self: &Rc<Self>, action: SelectionAction) {
+        let Some(mask) = self.diff.selection_mask() else {
+            return;
+        };
+        let Some(file) = self.diff.current() else {
+            return;
+        };
+        let Some((side, _)) = self.shown.borrow().clone() else {
+            return;
+        };
+
+        let result = self.state.with(|s| match (side, action) {
+            // Staged side: the selection moves back out of the index.
+            (Side::Staged, _) => stage::unstage_lines(&s.repo, &file, &mask),
+            (Side::Unstaged, SelectionAction::Move) => stage::stage_lines(&s.repo, &file, &mask),
+            // Discarding is a reverse-apply against the working tree, which
+            // `stage` does not cover — it only touches the index.
+            (Side::Unstaged, SelectionAction::Discard) => discard_lines(&s.repo, &file, &mask),
+        });
+
+        match result {
+            Some(Err(e)) => self.report(&format!("Could not update: {e}")),
+            None => self.report("No repository open"),
+            Some(Ok(())) => {}
+        }
+        self.refresh();
+    }
+
+    /// Discarding cannot be undone from the reflog, so it asks first.
+    fn confirm_discard(self: &Rc<Self>) {
+        let dialog = adw::AlertDialog::new(
+            Some("Discard selected changes?"),
+            Some(
+                "The selected lines will be removed from the working tree. \
+                 This cannot be undone — the changes were never committed, so \
+                 there is nothing to recover them from.",
+            ),
+        );
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("discard", "Discard");
+        dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response == "discard" {
+                this.apply_selection(SelectionAction::Discard);
+            }
+        });
+
+        if let Some(root) = self.root.root().and_downcast::<gtk::Window>() {
+            dialog.present(Some(&root));
         }
     }
 
@@ -193,13 +281,23 @@ impl ChangesView {
             }
         ));
 
-        // Restore the diff pane if the file it showed still has changes.
+        // Restore the diff pane if the file it showed still has changes;
+        // otherwise fall to the first file there is. Landing on an empty pane
+        // reads as a broken page rather than as "nothing selected", and the
+        // first unstaged file is what someone opening this page wants to see.
         let shown = self.shown.borrow().clone();
         match shown {
             Some((side, path)) if staged.iter().chain(unstaged.iter()).any(|e| e.path == path) => {
                 self.show_diff(side, &path);
             }
-            _ => self.clear_diff(),
+            _ => match unstaged
+                .first()
+                .map(|e| (Side::Unstaged, e.path.clone()))
+                .or_else(|| staged.first().map(|e| (Side::Staged, e.path.clone())))
+            {
+                Some((side, path)) => self.show_diff(side, &path),
+                None => self.clear_diff(),
+            },
         }
 
         self.update_commit_sensitivity();
@@ -307,38 +405,84 @@ impl ChangesView {
             .state
             .with(|s| diff::diff(&s.repo, source, Some(std::path::Path::new(path))));
 
-        let text = match diffs {
-            Some(Ok(files)) if !files.is_empty() => render(&files[0]),
-            // An untracked file has no diff against the index; show the file so
-            // the pane is not mysteriously blank.
-            Some(Ok(_)) => self
-                .state
-                .with(|s| {
-                    s.repo
-                        .workdir()
-                        .map(|w| w.join(path))
-                        .and_then(|p| std::fs::read_to_string(p).ok())
+        self.diff_title.set_text(path);
+        self.stage_sel_btn.set_label(match side {
+            Side::Staged => "Unstage",
+            Side::Unstaged => "Stage",
+        });
+
+        match diffs {
+            Some(Ok(files)) if !files.is_empty() => self.diff.show(&files[0]),
+            // An untracked file has no diff against the index. Synthesising one
+            // — every line an addition against an empty pre-image — is exactly
+            // what `git add -N` would produce, so the same staging path works
+            // on it rather than needing a special case.
+            Some(Ok(_)) => match self.untracked_as_diff(path) {
+                Some(f) => self.diff.show(&f),
+                None => self.diff.clear(),
+            },
+            Some(Err(e)) => {
+                self.diff.clear();
+                self.report(&format!("Could not read the diff: {e}"));
+            }
+            None => self.diff.clear(),
+        }
+
+        self.stage_sel_btn.set_sensitive(false);
+        self.discard_sel_btn.set_sensitive(false);
+    }
+
+    /// Build a diff for an untracked file: all additions, no pre-image.
+    fn untracked_as_diff(&self, path: &str) -> Option<FileDiff> {
+        let content = self
+            .state
+            .with(|s| {
+                s.repo
+                    .workdir()
+                    .map(|w| w.join(path))
+                    .and_then(|p| std::fs::read_to_string(p).ok())
+            })
+            .flatten()?;
+
+        let lines: Vec<_> = content.lines().collect();
+        let hunk = git::diff::Hunk {
+            old_start: 0,
+            old_count: 0,
+            new_start: 1,
+            new_count: lines.len() as u32,
+            section: String::new(),
+            lines: lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| git::diff::DiffLine {
+                    kind: git::diff::LineKind::Added,
+                    text: (*l).to_string(),
+                    old_lineno: None,
+                    new_lineno: Some(i as u32 + 1),
                 })
-                .flatten()
-                .map(|c| {
-                    c.lines()
-                        .map(|l| format!("+{l}"))
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_else(|| "(no textual diff)".into()),
-            Some(Err(e)) => format!("Could not read the diff:\n{e}"),
-            None => String::new(),
+                .collect(),
         };
 
-        self.diff_title.set_text(path);
-        self.diff_buffer.set_text(&text);
+        Some(FileDiff {
+            old_path: "/dev/null".into(),
+            new_path: path.to_string(),
+            header: vec![
+                format!("diff --git a/{path} b/{path}"),
+                "new file mode 100644".to_string(),
+                "--- /dev/null".to_string(),
+                format!("+++ b/{path}"),
+            ],
+            hunks: vec![hunk],
+            is_binary: false,
+        })
     }
 
     fn clear_diff(&self) {
         *self.shown.borrow_mut() = None;
         self.diff_title.set_text("Select a file");
-        self.diff_buffer.set_text("");
+        self.diff.clear();
+        self.stage_sel_btn.set_sensitive(false);
+        self.discard_sel_btn.set_sensitive(false);
     }
 
     fn do_commit(self: &Rc<Self>) {
@@ -385,53 +529,6 @@ impl ChangesView {
     }
 }
 
-/// Render a parsed diff back to patch text for display.
-///
-/// Round-tripping through our own parser rather than showing git's raw output
-/// means the viewer displays exactly what the staging code sees — if the parser
-/// mangles something, it is visible here rather than only in a rejected patch.
-fn render(file: &FileDiff) -> String {
-    if file.is_binary {
-        return format!("Binary file {} differs", file.new_path);
-    }
-
-    let mut out = String::new();
-    for hunk in &file.hunks {
-        out.push_str(&hunk.header());
-        out.push('\n');
-        for line in &hunk.lines {
-            out.push_str(&line.to_patch_line());
-            out.push('\n');
-        }
-    }
-    if out.is_empty() {
-        out.push_str("(no changes)");
-    }
-    out
-}
-
-/// Pick a source style scheme matching the current light/dark preference.
-///
-/// Names are tried in order because which schemes exist varies with the
-/// GtkSourceView version — `Adwaita-dark` arrived in 5.6, and falling back to
-/// `classic` is better than leaving a white pane in a dark window.
-fn apply_style_scheme(buffer: &sourceview::Buffer) {
-    let dark = adw::StyleManager::default().is_dark();
-    let candidates: &[&str] = if dark {
-        &["Adwaita-dark", "solarized-dark", "oblivion", "classic"]
-    } else {
-        &["Adwaita", "solarized-light", "classic"]
-    };
-
-    let manager = sourceview::StyleSchemeManager::default();
-    for name in candidates {
-        if let Some(scheme) = manager.scheme(name) {
-            buffer.set_style_scheme(Some(&scheme));
-            return;
-        }
-    }
-}
-
 fn file_list() -> gtk::ListBox {
     let list = gtk::ListBox::new();
     list.add_css_class("boxed-list");
@@ -449,13 +546,15 @@ fn clear(list: &gtk::ListBox) {
 fn build_layout(
     staged_list: &gtk::ListBox,
     unstaged_list: &gtk::ListBox,
-    diff_view: &sourceview::View,
+    diff_root: &gtk::Widget,
     diff_title: &gtk::Label,
+    stage_sel_btn: &gtk::Button,
+    discard_sel_btn: &gtk::Button,
     message: &gtk::TextView,
     commit_btn: &gtk::Button,
     amend: &gtk::CheckButton,
     summary: &gtk::Label,
-) -> gtk::Widget {
+) -> gtk::Paned {
     let section = |title: &str, list: &gtk::ListBox| {
         let b = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let l = gtk::Label::new(Some(title));
@@ -477,7 +576,7 @@ fn build_layout(
     left.set_margin_end(12);
     left.set_margin_top(12);
     left.set_margin_bottom(12);
-    left.set_size_request(320, -1);
+    left.set_size_request(280, -1);
 
     left.append(summary);
     left.append(&section("Staged", staged_list));
@@ -500,89 +599,87 @@ fn build_layout(
     actions.append(commit_btn);
     left.append(&actions);
 
-    let right = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    right.append(diff_title);
-    right.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    right.append(
-        &gtk::ScrolledWindow::builder()
-            .child(diff_view)
-            .vexpand(true)
-            .hexpand(true)
-            .build(),
-    );
+    // Diff header: file name on the left, actions on the right. The actions
+    // sit next to the diff rather than under the file list because they act on
+    // the selection inside the diff, not on the selected file.
+    let diff_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    diff_header.set_margin_start(12);
+    diff_header.set_margin_end(12);
+    diff_header.set_margin_top(6);
+    diff_header.set_margin_bottom(6);
+    diff_title.set_hexpand(true);
+    diff_header.append(diff_title);
+    diff_header.append(discard_sel_btn);
+    diff_header.append(stage_sel_btn);
 
-    let paned = gtk::Paned::builder()
+    let right = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    right.append(&diff_header);
+    right.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    right.append(diff_root);
+
+    gtk::Paned::builder()
         .orientation(gtk::Orientation::Horizontal)
         .start_child(&left)
         .end_child(&right)
-        .position(360)
+        // Both children may shrink below their natural size. Without this the
+        // diff pane is squeezed to whatever is left over rather than sharing,
+        // and on a tiled half-screen that is a few unreadable columns.
+        .shrink_start_child(true)
+        .shrink_end_child(true)
         .resize_start_child(false)
-        .build();
-
-    paned.upcast()
+        .position(340)
+        .build()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use git::diff;
 
     // `render` is pure, so it is testable without a display server — which is
     // the point of keeping the formatting out of the widget callbacks.
 
     #[test]
-    fn render_round_trips_a_diff_back_to_patch_text() {
-        let f = diff::parse(
-            "\
-diff --git a/a.txt b/a.txt
-index 1..2 100644
---- a/a.txt
-+++ b/a.txt
-@@ -1,3 +1,3 @@ ctx
- one
--two
-+TWO
- three
-",
-        )
-        .remove(0);
-
-        let out = render(&f);
-        assert!(out.starts_with("@@ -1,3 +1,3 @@ ctx\n"), "{out}");
-        assert!(out.contains("-two\n"));
-        assert!(out.contains("+TWO\n"));
-        assert!(
-            out.contains(" one\n"),
-            "context must keep its leading space"
-        );
-        assert!(
-            !out.contains("diff --git"),
-            "the file header is shown in the title bar, not the pane"
-        );
-    }
-
-    #[test]
-    fn render_names_binary_files_instead_of_showing_bytes() {
-        let f = diff::parse(
-            "\
-diff --git a/x.png b/x.png
-index 1..2 100644
-Binary files a/x.png and b/x.png differ
-",
-        )
-        .remove(0);
-        assert_eq!(render(&f), "Binary file x.png differs");
-    }
-
-    #[test]
-    fn render_says_so_when_there_is_nothing_to_show() {
+    fn untracked_files_become_all_addition_diffs() {
+        // The synthesised diff has to be shaped like a real one, because the
+        // same staging path consumes it.
         let f = FileDiff {
-            old_path: "a".into(),
-            new_path: "a".into(),
-            header: vec![],
-            hunks: vec![],
+            old_path: "/dev/null".into(),
+            new_path: "new.txt".into(),
+            header: vec![
+                "diff --git a/new.txt b/new.txt".into(),
+                "new file mode 100644".into(),
+                "--- /dev/null".into(),
+                "+++ b/new.txt".into(),
+            ],
+            hunks: vec![git::diff::Hunk {
+                old_start: 0,
+                old_count: 0,
+                new_start: 1,
+                new_count: 2,
+                section: String::new(),
+                lines: vec![
+                    git::diff::DiffLine {
+                        kind: git::diff::LineKind::Added,
+                        text: "first".into(),
+                        old_lineno: None,
+                        new_lineno: Some(1),
+                    },
+                    git::diff::DiffLine {
+                        kind: git::diff::LineKind::Added,
+                        text: "second".into(),
+                        old_lineno: None,
+                        new_lineno: Some(2),
+                    },
+                ],
+            }],
             is_binary: false,
         };
-        assert_eq!(render(&f), "(no changes)");
+
+        // Every line stageable, and the patch a real one git would accept.
+        let mask = vec![vec![true, true]];
+        let patch = git::stage::build_patch(&f, &mask, git::stage::PatchTarget::Index).unwrap();
+        assert!(patch.contains("--- /dev/null"), "{patch}");
+        assert!(patch.contains("+first"), "{patch}");
+        assert!(patch.contains("@@ -0,0 +1,2 @@"), "{patch}");
     }
 }

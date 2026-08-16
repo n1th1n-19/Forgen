@@ -7,6 +7,7 @@
 
 pub mod changes;
 pub mod commit_list;
+pub mod diff_view;
 pub mod login;
 pub mod settings;
 pub mod state;
@@ -33,6 +34,7 @@ pub fn build_window(
 ) -> adw::ApplicationWindow {
     let state = AppState::new();
     let prefs = settings::open();
+    load_css();
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
@@ -48,6 +50,14 @@ pub fn build_window(
 
     // --- header -------------------------------------------------------------
     let header = adw::HeaderBar::new();
+
+    // Reveals the branch list once a narrow window has hidden it. Always
+    // present rather than only when collapsed: a toggle that appears and
+    // disappears shifts every other button sideways as the window resizes.
+    let sidebar_btn = gtk::ToggleButton::new();
+    sidebar_btn.set_icon_name("sidebar-show-symbolic");
+    sidebar_btn.set_tooltip_text(Some("Show branches"));
+    header.pack_start(&sidebar_btn);
 
     let open_btn = gtk::Button::from_icon_name("folder-open-symbolic");
     open_btn.set_tooltip_text(Some("Open a repository"));
@@ -180,9 +190,17 @@ pub fn build_window(
     content.add_top_bar(&header);
     content.set_content(Some(&stack));
 
-    let split = adw::NavigationSplitView::builder()
-        .sidebar(&adw::NavigationPage::new(&sidebar, "Branches"))
-        .content(&adw::NavigationPage::new(&content, "History"))
+    // OverlaySplitView, not NavigationSplitView.
+    //
+    // NavigationSplitView collapses into a *navigation stack*: the sidebar
+    // becomes a page you navigate away from, so on a narrow window the commit
+    // list and diff disappear entirely until the user taps a branch. Overlay
+    // keeps content on screen full-width and slides the branch list over it,
+    // which is what a sidebar should do when space runs out.
+    let split = adw::OverlaySplitView::builder()
+        .sidebar(&sidebar)
+        .content(&content)
+        .max_sidebar_width(260.0)
         .build();
 
     // The overlay wraps everything so `sync` can find it from the window and
@@ -190,6 +208,50 @@ pub fn build_window(
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&split));
     window.set_content(Some(&toasts));
+
+    // Collapse the branch sidebar on a narrow window.
+    //
+    // Not a hypothetical: COSMIC auto-tiles, so a window on a 1366px display
+    // routinely gets half of it. At 680px the three columns — branches, file
+    // lists, diff — left the diff about 130px wide and unreadable. The sidebar
+    // is the one that can fold away without losing a workflow, since the branch
+    // list is navigation rather than working surface.
+    let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        900.0,
+        adw::LengthUnit::Px,
+    ));
+    breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+    // Collapsed alone would leave the sidebar overlaying the content on open.
+    // Hiding it too means a narrow window starts on the work, with the branch
+    // list one button away.
+    breakpoint.add_setter(&split, "show-sidebar", Some(&false.to_value()));
+
+    // Narrower still: the file list and the diff cannot share a row either, so
+    // the Changes page stacks them.
+    let narrow = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+        adw::BreakpointConditionLengthType::MaxWidth,
+        640.0,
+        adw::LengthUnit::Px,
+    ));
+    narrow.add_setter(&split, "collapsed", Some(&true.to_value()));
+    narrow.add_setter(&split, "show-sidebar", Some(&false.to_value()));
+    narrow.add_setter(
+        &changes.paned,
+        "orientation",
+        Some(&gtk::Orientation::Vertical.to_value()),
+    );
+    window.add_breakpoint(breakpoint);
+    window.add_breakpoint(narrow);
+
+    // Two-way: the button drives the sidebar, and a breakpoint hiding the
+    // sidebar un-presses the button, so its state never lies about what is
+    // on screen.
+    split
+        .bind_property("show-sidebar", &sidebar_btn, "active")
+        .bidirectional()
+        .sync_create()
+        .build();
 
     // --- wiring -------------------------------------------------------------
     let views = Views {
@@ -309,6 +371,24 @@ pub fn build_window(
     }
 
     window
+}
+
+/// Install the application stylesheet once per display.
+///
+/// `APPLICATION` priority sits above the theme but below user overrides in
+/// `~/.config/gtk-4.0/gtk.css`, so a user who wants different diff colours can
+/// still have them.
+fn load_css() {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(diff_view::CSS);
+
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 }
 
 /// The widgets a repository load has to touch.

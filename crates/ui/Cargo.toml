@@ -13,7 +13,6 @@ github.workspace = true
 
 gtk.workspace = true
 adw.workspace = true
-sourceview.workspace = true
 
 # Bridges the tokio worker to the glib main context. glib's own channels were
 # removed in gtk4-rs 0.18 in favour of this.

@@ -33,7 +33,7 @@ RSS growth exceeds 64MB. Current measurement: **12MB**.
 
 ## Status
 
-R0 and R1 complete. 140 tests.
+R0 and R1 complete. 145 tests.
 
 **Engine — all tested against real repositories:**
 windowed history over large repositories · refs · working-tree status ·
@@ -46,12 +46,14 @@ from index stages · device-flow auth · keyring storage · `gh` token import ·
 HTTP revalidation cache · rate limiting.
 
 **UI:** History page with the windowed commit list · Changes page with
-staged/unstaged lists, syntax-highlighted diff pane and commit box · sync
-buttons · branch switching by double-click · session restore.
+staged/unstaged lists, an interactive diff pane supporting **hunk- and
+line-level staging, unstaging and discarding**, and a commit box · sync
+buttons with live progress · branch switching · responsive layout that
+collapses the sidebar and stacks the panes on a narrow window · session
+restore.
 
-**Engine-complete but not yet surfaced in the UI:** hunk- and line-level
-staging (only whole files are stageable from the interface), the three-way
-conflict resolver, and stash management.
+**Engine-complete but not yet surfaced in the UI:** the three-way conflict
+resolver and stash management.
 
 **Not built:** everything in R2–R5 — pull requests, issues, Actions,
 notifications, interactive rebase, worktrees, reflog, search, releases. See
@@ -127,16 +129,17 @@ readable with `strings` and is therefore not a secret.
 ## Building
 
 ```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev \
-                 meson flatpak-builder
+sudo apt install libgtk-4-dev libadwaita-1-dev meson flatpak-builder
 
 cargo build --workspace
 cargo run --bin forqen -- /path/to/repo
 ```
 
-`libgtksourceview-5-0` (the runtime library, pulled in by the `-dev` package) is
-required at run time as well as build time — it is not installed by default on
-Pop!_OS, and its absence shows up only when the binary starts.
+GtkSourceView is deliberately not a dependency. The diff pane is a
+`GtkColumnView` where one row is one diff line, so a selection maps to diff
+lines unambiguously — which is what makes line-level staging possible. A
+`GtkTextView` selection is a character range, and recovering "which lines" from
+it is guesswork the moment a line wraps.
 
 The engine crates carry no GTK dependency and need none of that:
 
@@ -160,8 +163,8 @@ for the keyring, and git itself is bundled as a module because
 ## Testing
 
 ```bash
-cargo test --workspace                       # 140 tests
-cargo test -p git -p auth -p db -p github    # 137 of them, no display server needed
+cargo test --workspace                       # 145 tests
+cargo test -p git -p auth -p db -p github    # 139 of them, no display server needed
 cargo test -p git --test memcheck --release  # the memory gate
 cargo test -p auth -- --ignored              # keyring round trip, needs a session bus
 ```
@@ -173,9 +176,10 @@ contents* after a partial stage, not just that the command exited zero — a
 synthesized patch that applies cleanly but stages the wrong lines is the
 failure mode that matters.
 
-Not covered by tests: GTK widget interaction. The window builds, runs and
-renders, but clicking through the Changes page has not been verified
-programmatically.
+Not covered by tests: GTK widget interaction. The window has been run and
+visually verified against a real repository — history, the Changes page, the
+interactive diff and the responsive layout all render correctly — but button
+clicks have not been driven programmatically.
 
 ## Licence
 
