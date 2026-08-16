@@ -57,6 +57,14 @@ modules:
   # pins the version the differential tests were written against.
   - name: git
     buildsystem: autotools
+    # GNOME SDK 50 ships GCC 15, which defaults to C23. git before 2.48 has a
+    # static function named `unreachable` in reflog.c, and C23 makes
+    # `unreachable()` a macro in stddef.h — so those builds fail with
+    # "macro 'unreachable' passed 3 arguments, but takes just 0". 2.51 renamed
+    # it. `-std=gnu17` also works and is the fallback if this ever has to be
+    # pinned back.
+    build-options:
+      cflags: -O2 -g
     make-args:
       - NO_TCLTK=1
       - NO_GETTEXT=1
@@ -65,11 +73,11 @@ modules:
       - NO_GETTEXT=1
     sources:
       - type: archive
-        url: https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.47.1.tar.xz
-        # Verified against the kernel.org tarball with sha256sum on 2026-08-16.
+        url: https://mirrors.edge.kernel.org/pub/software/scm/git/git-2.51.0.tar.xz
+        # Verified against the kernel.org tarball with sha256sum on 2026-08-17.
         # If this ever mismatches, the build fails loudly — that is correct.
         # Do not "fix" a mismatch by deleting the hash.
-        sha256: f3d8f9bb23ae392374e91cd9d395970dabc5b9c5ee72f39884613cd84a6ed310
+        sha256: 60a7c2251cc2e588d5cd87bae567260617c6de0c22dca9cdbfc4c7d2b8990b62
     cleanup:
       - /libexec/git-core/git-cvs*
       - /libexec/git-core/git-svn*

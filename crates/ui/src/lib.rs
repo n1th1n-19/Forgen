@@ -10,11 +10,13 @@ pub mod commit_list;
 pub mod conflicts;
 pub mod diff_view;
 pub mod login;
+pub mod pulls;
 pub mod settings;
 pub mod stash;
 pub mod state;
 pub mod sync;
 
+use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -22,6 +24,13 @@ use adw::prelude::*;
 
 use commit_list::CommitListModel;
 use state::AppState;
+
+/// A callback slot filled in after construction.
+///
+/// Needed because the Pull Requests page must be able to reload the window, but
+/// the window's `Views` does not exist until after the page is built. The cell
+/// breaks the cycle without leaking either side.
+type ReloadSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
 pub const APP_ID: &str = "io.github.forqen.Forqen";
 
@@ -159,6 +168,24 @@ pub fn build_window(
     let changes = changes::ChangesView::new(state.clone());
     let conflicts = conflicts::ConflictView::new(state.clone());
 
+    // Checking out a pull request moves HEAD, so the whole window follows.
+    let pulls_view = {
+        let state_ = state.clone();
+        let reload: ReloadSlot = Rc::new(RefCell::new(None));
+        let reload_ = reload.clone();
+        let view = pulls::PullsView::new(
+            state_,
+            rt.clone(),
+            Rc::new(move || {
+                if let Some(f) = reload_.borrow().as_ref() {
+                    f();
+                }
+            }),
+        );
+        (view, reload)
+    };
+    let (pulls_page_view, pulls_reload) = pulls_view;
+
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(&main_pane, Some("history"), "History", "view-list-symbolic");
     stack.add_titled_with_icon(
@@ -179,6 +206,16 @@ pub fn build_window(
     );
     conflicts_page.set_visible(false);
 
+    // Pull requests need both a GitHub remote and a signed-in account. Hidden
+    // rather than empty: a tab that can never load anything is noise.
+    let pulls_page = stack.add_titled_with_icon(
+        &pulls_page_view.root,
+        Some("pulls"),
+        "Pull Requests",
+        "mail-send-receive-symbolic",
+    );
+    pulls_page.set_visible(false);
+
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
         .policy(adw::ViewSwitcherPolicy::Wide)
@@ -191,6 +228,7 @@ pub fn build_window(
     {
         let changes = changes.clone();
         let conflicts_ = conflicts.clone();
+        let pulls_ = pulls_page_view.clone();
         let prefs = prefs.clone();
         stack.connect_visible_child_name_notify(move |s| {
             let Some(name) = s.visible_child_name() else {
@@ -202,9 +240,12 @@ pub fn build_window(
             if name == "conflicts" {
                 conflicts_.refresh();
             }
+            if name == "pulls" {
+                pulls_.refresh();
+            }
             // Only the permanent pages are worth restoring — a Conflicts page
             // saved here would be gone by the next launch.
-            if name != "conflicts" {
+            if name != "conflicts" && name != "pulls" {
                 if let Some(p) = &prefs {
                     p.set_string("last-page", &name).ok();
                 }
@@ -301,6 +342,8 @@ pub fn build_window(
         stack: stack.clone(),
         conflicts_page: conflicts_page.clone(),
         conflicts: conflicts.clone(),
+        pulls_page: pulls_page.clone(),
+        pulls: pulls_page_view.clone(),
     };
 
     {
@@ -409,6 +452,18 @@ pub fn build_window(
         stack.set_visible_child_name(&p.string("last-page"));
     }
 
+    {
+        let views_ = views.clone();
+        *pulls_reload.borrow_mut() = Some(Rc::new(move || {
+            if let Some(Some(path)) = views_
+                .state
+                .with(|s| s.repo.workdir().map(|p| p.to_path_buf()))
+            {
+                views_.load_repo(&path);
+            }
+        }));
+    }
+
     if let Some(path) = startup {
         views.load_repo(&path);
     }
@@ -470,6 +525,25 @@ pub fn build_window(
     }
 
     window
+}
+
+/// Build an API client for the default account, if one is signed in.
+///
+/// Returns `None` when there is no account or the keyring is unreachable —
+/// both mean the GitHub views cannot work, and neither is an error worth
+/// interrupting the user over.
+fn github_client() -> Option<std::sync::Arc<github::Client>> {
+    let store = std::sync::Arc::new(db::Db::open_default().ok()?);
+    let row = store.default_account(auth::DEFAULT_HOST).ok()??;
+    let account = auth::Account {
+        host: row.host,
+        login: row.login,
+        is_default_for_host: true,
+    };
+    let token = auth::store::load(&account).ok()?;
+    github::Client::new(account, token.access, store)
+        .ok()
+        .map(std::sync::Arc::new)
 }
 
 /// Register one action per header button, plus its accelerator.
@@ -545,6 +619,8 @@ struct Views {
     stack: adw::ViewStack,
     conflicts_page: adw::ViewStackPage,
     conflicts: Rc<conflicts::ConflictView>,
+    pulls_page: adw::ViewStackPage,
+    pulls: Rc<pulls::PullsView>,
 }
 
 impl Views {
@@ -566,6 +642,29 @@ impl Views {
         }
     }
 
+    /// Bind the Pull Requests page to this repository, or hide it.
+    ///
+    /// Requires both a parseable GitHub remote and a stored token. Either alone
+    /// gives a page that can only ever show an error.
+    fn update_pulls(&self) {
+        let target = pulls::detect_repo(&self.state).and_then(|(owner, repo)| {
+            let client = github_client()?;
+            Some(pulls::Target {
+                owner,
+                repo,
+                client,
+            })
+        });
+
+        let available = target.is_some();
+        self.pulls.set_target(target);
+        self.pulls_page.set_visible(available);
+
+        if !available && self.stack.visible_child_name().as_deref() == Some("pulls") {
+            self.stack.set_visible_child_name("history");
+        }
+    }
+
     /// Open a repository and populate every view that shows it.
     fn load_repo(&self, path: &Path) {
         self.model.clear();
@@ -583,6 +682,7 @@ impl Views {
         settings::push_recent(self.prefs.as_ref(), path);
 
         self.update_conflicts();
+        self.update_pulls();
 
         if let Some((name, branch)) = self.state.with(|s| s.name_and_branch()) {
             self.sidebar_title.set_title(&name);
