@@ -11,6 +11,7 @@ pub mod conflicts;
 pub mod diff_view;
 pub mod login;
 pub mod settings;
+pub mod stash;
 pub mod state;
 pub mod sync;
 
@@ -63,6 +64,10 @@ pub fn build_window(
     let open_btn = gtk::Button::from_icon_name("folder-open-symbolic");
     open_btn.set_tooltip_text(Some("Open a repository"));
     header.pack_start(&open_btn);
+
+    let stash_btn = gtk::Button::from_icon_name("edit-paste-symbolic");
+    stash_btn.set_tooltip_text(Some("Stashes"));
+    header.pack_start(&stash_btn);
 
     let account_btn = gtk::Button::from_icon_name("avatar-default-symbolic");
     account_btn.set_tooltip_text(Some("Sign in to GitHub"));
@@ -415,6 +420,44 @@ pub fn build_window(
         _ => changes.refresh(),
     }
 
+    // --- actions and accelerators -------------------------------------------
+    //
+    // Every header button also gets a GAction, so the whole app is reachable
+    // from the keyboard and each entry appears in the shell's action list.
+    // Registering them on the application rather than the window also puts them
+    // on the session bus, which is how they can be driven without a pointer.
+    install_actions(
+        app,
+        &open_btn,
+        &stash_btn,
+        &fetch_btn,
+        &pull_btn,
+        &push_btn,
+        &account_btn,
+    );
+
+    {
+        let views_ = views.clone();
+        let window_ = window.clone();
+        stash_btn.connect_clicked(move |_| {
+            let views_inner = views_.clone();
+            stash::StashDialog::present(
+                &window_,
+                views_inner.state.clone(),
+                // Stashing and popping both rewrite the working tree, so every
+                // view of it has to catch up.
+                Rc::new(move || {
+                    if let Some(Some(path)) = views_inner
+                        .state
+                        .with(|s| s.repo.workdir().map(|p| p.to_path_buf()))
+                    {
+                        views_inner.load_repo(&path);
+                    }
+                }),
+            );
+        });
+    }
+
     {
         let window_ = window.clone();
         let rt_ = rt.clone();
@@ -427,6 +470,44 @@ pub fn build_window(
     }
 
     window
+}
+
+/// Register one action per header button, plus its accelerator.
+///
+/// The actions activate the buttons rather than duplicating their handlers, so
+/// there is exactly one implementation of each command and a disabled button
+/// disables its shortcut for free.
+fn install_actions(
+    app: &adw::Application,
+    open_btn: &gtk::Button,
+    stash_btn: &gtk::Button,
+    fetch_btn: &gtk::Button,
+    pull_btn: &gtk::Button,
+    push_btn: &gtk::Button,
+    account_btn: &gtk::Button,
+) {
+    let entries: [(&str, &gtk::Button, &[&str]); 6] = [
+        ("open", open_btn, &["<Control>o"]),
+        ("stashes", stash_btn, &["<Control><Shift>s"]),
+        ("fetch", fetch_btn, &["<Control>r"]),
+        ("pull", pull_btn, &["<Control><Shift>p"]),
+        ("push", push_btn, &["<Control>p"]),
+        ("account", account_btn, &[]),
+    ];
+
+    for (name, button, accels) in entries {
+        let action = gtk::gio::SimpleAction::new(name, None);
+        let button = button.clone();
+        action.connect_activate(move |_, _| {
+            if button.is_sensitive() {
+                button.emit_clicked();
+            }
+        });
+        app.add_action(&action);
+        if !accels.is_empty() {
+            app.set_accels_for_action(&format!("app.{name}"), accels);
+        }
+    }
 }
 
 /// Install the application stylesheet once per display.

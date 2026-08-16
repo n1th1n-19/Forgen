@@ -50,10 +50,9 @@ staged/unstaged lists, an interactive diff pane supporting **hunk- and
 line-level staging, unstaging and discarding**, and a commit box · sync
 buttons with live progress · branch switching · a three-way conflict
 resolver that appears only while a merge is stopped · responsive layout that
-collapses the sidebar and stacks the panes on a narrow window · session
-restore.
-
-**Engine-complete but not yet surfaced in the UI:** stash management.
+collapses the sidebar and stacks the panes on a narrow window · stash
+browser with per-stash diff preview · keyboard actions exported on the
+session bus · session restore.
 
 **Not built:** everything in R2–R5 — pull requests, issues, Actions,
 notifications, interactive rebase, worktrees, reflog, search, releases. See
