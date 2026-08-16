@@ -8,6 +8,7 @@
 //! notifications inbox being free and being impossible.
 
 pub mod models;
+pub mod pulls;
 pub mod rate_limit;
 
 use std::sync::{Arc, Mutex};

@@ -316,6 +316,40 @@ fn capture(repo: &Repo, args: &[&str]) -> Result<Vec<u8>, GitError> {
     Ok(out.stdout)
 }
 
+/// Fetch a pull request's head into a local branch.
+///
+/// Uses the `refs/pull/<n>/head` refspec that GitHub publishes on the *base*
+/// repository, rather than adding the contributor's fork as a remote.
+///
+/// That distinction matters. Adding a remote per contributor accumulates
+/// remotes nobody prunes, breaks when the fork is deleted or renamed, and needs
+/// separate credentials for a private fork. `refs/pull/*` lives on the
+/// repository the user already has access to, so one refspec covers same-repo
+/// branches and forks alike — including forks that have since been deleted,
+/// where the fork remote would not resolve at all.
+///
+/// The local branch is namespaced (`pr/<n>`) because two open pull requests
+/// from different forks routinely share a head branch name like `patch-1`.
+pub fn fetch_pull_request(
+    repo: &Repo,
+    remote: &str,
+    number: u64,
+    local_branch: &str,
+    token: Option<&str>,
+    progress: ProgressSink<'_>,
+) -> Result<(), GitError> {
+    let refspec = format!("refs/pull/{number}/head:refs/heads/{local_branch}");
+    // `--force` so re-fetching an updated pull request moves the local branch
+    // instead of refusing on a non-fast-forward — a rebased PR is the normal
+    // case, not an error.
+    run_with_progress(
+        repo,
+        &["fetch", "--progress", "--force", remote, &refspec],
+        token,
+        progress,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,6 +658,144 @@ mod tests {
         assert!(
             a.path().join("shared.txt").exists(),
             "pull should have brought the file down"
+        );
+    }
+
+    #[test]
+    fn fetches_a_pull_request_into_a_namespaced_branch() {
+        // Simulate what GitHub publishes: the base repository carries the PR
+        // head at refs/pull/<n>/head, so no fork remote is involved.
+        let remote_dir = bare_remote();
+        let a = fixture(2);
+        let repo_a = Repo::open(a.path()).unwrap();
+        add(&repo_a, "origin", remote_dir.path().to_str().unwrap()).unwrap();
+        push(
+            &repo_a,
+            "origin",
+            "main",
+            PushMode::Normal,
+            true,
+            None,
+            &mut noop,
+        )
+        .unwrap();
+
+        // A contributor's commit, published only under refs/pull/7/head.
+        std::fs::write(a.path().join("contrib.txt"), "from a fork\n").unwrap();
+        crate::stage::stage_file(&repo_a, "contrib.txt").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(a.path())
+            .args(["commit", "-q", "-m", "contributed"])
+            .env("GIT_AUTHOR_NAME", "C")
+            .env("GIT_AUTHOR_EMAIL", "c@e.invalid")
+            .env("GIT_COMMITTER_NAME", "C")
+            .env("GIT_COMMITTER_EMAIL", "c@e.invalid")
+            .output()
+            .unwrap();
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(a.path())
+            .args(["push", "origin", "HEAD:refs/pull/7/head"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "seeding refs/pull failed");
+
+        // A fresh clone has no knowledge of the contributor at all.
+        let clone_dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["clone", "-q"])
+            .arg(remote_dir.path())
+            .arg(clone_dir.path())
+            .output()
+            .unwrap();
+        let clone = Repo::open(clone_dir.path()).unwrap();
+
+        fetch_pull_request(&clone, "origin", 7, "pr/7", None, &mut noop).unwrap();
+
+        let refs: Vec<_> = crate::refs::list(&clone)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.short)
+            .collect();
+        assert!(
+            refs.contains(&"pr/7".to_string()),
+            "expected a pr/7 branch, got {refs:?}"
+        );
+
+        // And it carries the contributor's commit.
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["log", "--format=%s", "pr/7", "-1"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "contributed");
+    }
+
+    #[test]
+    fn re_fetching_a_rewritten_pull_request_moves_the_branch() {
+        let remote_dir = bare_remote();
+        let a = fixture(1);
+        let repo_a = Repo::open(a.path()).unwrap();
+        add(&repo_a, "origin", remote_dir.path().to_str().unwrap()).unwrap();
+        push(
+            &repo_a,
+            "origin",
+            "main",
+            PushMode::Normal,
+            true,
+            None,
+            &mut noop,
+        )
+        .unwrap();
+
+        let seed = |msg: &str| {
+            std::fs::write(a.path().join("p.txt"), format!("{msg}\n")).unwrap();
+            crate::stage::stage_file(&repo_a, "p.txt").unwrap();
+            Command::new("git")
+                .arg("-C")
+                .arg(a.path())
+                .args(["commit", "-q", "--amend", "-m", msg])
+                .env("GIT_AUTHOR_NAME", "C")
+                .env("GIT_AUTHOR_EMAIL", "c@e.invalid")
+                .env("GIT_COMMITTER_NAME", "C")
+                .env("GIT_COMMITTER_EMAIL", "c@e.invalid")
+                .output()
+                .unwrap();
+            Command::new("git")
+                .arg("-C")
+                .arg(a.path())
+                .args(["push", "--force", "origin", "HEAD:refs/pull/9/head"])
+                .output()
+                .unwrap();
+        };
+
+        seed("first version");
+        let clone_dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["clone", "-q"])
+            .arg(remote_dir.path())
+            .arg(clone_dir.path())
+            .output()
+            .unwrap();
+        let clone = Repo::open(clone_dir.path()).unwrap();
+        fetch_pull_request(&clone, "origin", 9, "pr/9", None, &mut noop).unwrap();
+
+        // The contributor rebases and force-pushes — the normal case.
+        seed("rewritten version");
+        fetch_pull_request(&clone, "origin", 9, "pr/9", None, &mut noop)
+            .expect("a rebased pull request must not fail on non-fast-forward");
+
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(clone_dir.path())
+            .args(["log", "--format=%s", "pr/9", "-1"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "rewritten version"
         );
     }
 
