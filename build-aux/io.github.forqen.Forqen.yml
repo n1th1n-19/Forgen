@@ -15,6 +15,22 @@ sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
 command: forqen
 
+# Skip flatpak-builder's AppStream catalog generation.
+#
+# `appstreamcli compose` loads icons through glycin, which spawns a nested
+# sandbox via flatpak-spawn — and that cannot start inside flatpak-builder's
+# own sandbox. It fails identically on SVG and PNG:
+#
+#   file-read-error: Loader process exited early with status '1'
+#   Command: ... flatpak-spawn --sandbox ... glycin-image-rs
+#
+# Nothing is lost. The metainfo file is still installed and still validates;
+# only the pre-composed catalog XML is skipped, and Flathub regenerates that
+# on its own infrastructure at publish time. Re-enable and re-test when the
+# runtime's glycin can run unsandboxed, or when building on a host where the
+# nested sandbox is permitted.
+appstream-compose: false
+
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:

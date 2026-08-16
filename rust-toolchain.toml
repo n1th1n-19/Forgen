@@ -1,0 +1,9 @@
+# Pinned so `-D warnings` in CI means the same thing locally.
+#
+# CI ran clippy 1.97 while local was 1.96; a lint that existed only in the
+# newer one failed the build after a clean local run. Bumping this is a
+# deliberate commit that surfaces new lints once, rather than whenever a
+# runner image happens to update.
+[toolchain]
+channel = "1.97.0"
+components = ["clippy", "rustfmt"]

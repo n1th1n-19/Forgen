@@ -3,7 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -70,16 +72,39 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
+  # Packaging validation, deliberately not on every push.
+  #
+  # A Flatpak build downloads ~1GB of GNOME SDK and compiles the whole
+  # dependency tree inside the sandbox — several minutes and a lot of bandwidth
+  # to re-prove something that only changes when the manifest does. Runs on
+  # tags and on demand.
+  #
+  # No container image: bilelmoussaoui/flatpak-github-actions publishes tags up
+  # to gnome-47, and this manifest targets runtime 50, so flatpak is installed
+  # on the runner instead and the SDK comes from flathub.
   flatpak:
     name: flatpak
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    container:
-      image: bilelmoussaoui/flatpak-github-actions:gnome-48
-      options: --privileged
     steps:
       - uses: actions/checkout@v4
-      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
-        with:
-          bundle: forqen.flatpak
-          manifest-path: build-aux/io.github.forqen.Forqen.yml
-          cache-key: flatpak-builder-${{ github.sha }}
+
+      - name: Install flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          flatpak remote-add --if-not-exists --user \
+            flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # vendor/ is gitignored — 437MB has no business in the repository — so it
+      # is regenerated here. The build sandbox has no network, so without this
+      # cargo cannot resolve a single dependency.
+      - name: Vendor crates for the offline sandbox
+        run: cargo vendor --versioned-dirs vendor
+
+      - name: Build
+        run: |
+          flatpak-builder --user --install-deps-from=flathub --force-clean \
+            build build-aux/io.github.forqen.Forqen.yml

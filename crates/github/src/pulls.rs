@@ -200,14 +200,11 @@ impl Client {
 /// a local path or an unrelated host has no owner/name to find.
 pub fn parse_remote(url: &str) -> Option<(String, String)> {
     let trimmed = url.trim().trim_end_matches('/');
-    let path = if let Some(rest) = trimmed.split_once("://") {
+    let path = match trimmed.split_once("://") {
         // https://host/owner/name — drop the scheme, then the host.
-        rest.1.split_once('/')?.1
-    } else if let Some(rest) = trimmed.split_once(':') {
+        Some((_, rest)) => rest.split_once('/')?.1,
         // git@host:owner/name
-        rest.1
-    } else {
-        return None;
+        None => trimmed.split_once(':')?.1,
     };
 
     let path = path.strip_suffix(".git").unwrap_or(path);

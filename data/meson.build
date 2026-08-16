@@ -41,15 +41,31 @@ endif
 # --- icons ---------------------------------------------------------------------
 # Installed under hicolor rather than an app-private directory so the icon is
 # found by the shell, the app switcher, and notifications — not just by GTK.
-install_data(
-  'icons/hicolor/scalable/apps/@0@.svg'.format(app_id),
-  install_dir: datadir / 'icons' / 'hicolor' / 'scalable' / 'apps',
-)
+#
+# PNG only for the application icon, deliberately. The scalable SVG is the
+# source of truth and lives in the repository, but installing it breaks the
+# Flatpak export: flatpak validates every exported icon through an image
+# loader that cannot read SVG in the build environment, and fails the whole
+# export with "is not a valid icon: Format not recognized". 256x256 covers
+# HiDPI in practice.
+#
+# Regenerate after editing the SVG:
+#   rsvg-convert -w N -h N icons/hicolor/scalable/apps/<id>.svg \
+#       -o icons/hicolor/NxN/apps/<id>.png
+foreach size : ['64', '128', '256']
+  install_data(
+    'icons/hicolor/@0@x@0@/apps/@1@.png'.format(size, app_id),
+    install_dir: datadir / 'icons' / 'hicolor' / '@0@x@0@'.format(size) / 'apps',
+  )
+endforeach
 
-install_data(
-  'icons/hicolor/symbolic/apps/@0@-symbolic.svg'.format(app_id),
-  install_dir: datadir / 'icons' / 'hicolor' / 'symbolic' / 'apps',
-)
+# The symbolic icon is not installed for the same reason as the scalable one:
+# flatpak's export-time validation rejects every SVG here with "Format not
+# recognized", because the image loader it uses (glycin) needs a nested
+# sandbox that will not start inside flatpak-builder. Both SVGs remain in the
+# repository as sources; restore these install_data calls on a host where the
+# nested sandbox works, or once the runtime ships a loader that does not need
+# one.
 
 # --- gsettings schema ----------------------------------------------------------
 install_data(

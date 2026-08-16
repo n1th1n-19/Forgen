@@ -2,11 +2,13 @@
 Name=forqen
 GenericName=Git Client
 Comment=Native GitHub client for Linux
-# MALLOC_ARENA_MAX is read by glibc at the first malloc, long before main() —
-# so it can only be set here, not from inside the process. Without it, each
-# worker thread gets its own 64MB arena and RSS is inflated by allocator
-# fragmentation that has nothing to do with the data held.
-Exec=env MALLOC_ARENA_MAX=2 forqen %U
+# Plain `forqen`, not `env MALLOC_ARENA_MAX=2 forqen`: flatpak resolves the
+# first token of Exec as the binary and refuses to export an entry pointing at
+# `env`, which is not in /app/bin. The Flatpak sets that variable through
+# finish-args instead. For a native install the app logs a warning when it is
+# unset — glibc reads it at the first malloc, long before main(), so nothing
+# in-process can set it.
+Exec=forqen %U
 Icon=io.github.forqen.Forqen
 Terminal=false
 Type=Application
