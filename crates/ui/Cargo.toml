@@ -1,0 +1,23 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+git.workspace = true
+auth.workspace = true
+db.workspace = true
+github.workspace = true
+
+gtk.workspace = true
+adw.workspace = true
+sourceview.workspace = true
+
+# Bridges the tokio worker to the glib main context. glib's own channels were
+# removed in gtk4-rs 0.18 in favour of this.
+async-channel = "2"
+reqwest.workspace = true
+tokio.workspace = true
+tracing.workspace = true

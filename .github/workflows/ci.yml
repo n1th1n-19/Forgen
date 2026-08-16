@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail the build on warnings rather than letting them accumulate into noise
+  # nobody reads.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # The engine crates carry no GTK dependency by design, so they build and test
+  # without a display server or any system development packages. Keeping this
+  # job separate means a UI toolchain problem never masks a git-engine failure.
+  engine:
+    name: engine (git, auth, db, github)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy -p git -p auth -p db -p github --all-targets
+
+      - name: Test
+        run: cargo test -p git -p auth -p db -p github
+
+  # The memory budget is forqen's differentiating claim. A claim nobody
+  # measures rots within a sprint, so it gates every pull request.
+  memcheck:
+    name: memory budget
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Scroll a 20k-commit history under budget
+        run: cargo test -p git --test memcheck --release -- --nocapture
+
+  ui:
+    name: ui + app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK4 and libadwaita
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy
+        run: cargo clippy -p ui -p app --all-targets
+
+      - name: Build
+        run: cargo build --workspace
+
+  flatpak:
+    name: flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: bilelmoussaoui/flatpak-github-actions:gnome-48
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: forqen.flatpak
+          manifest-path: build-aux/io.github.forqen.Forqen.yml
+          cache-key: flatpak-builder-${{ github.sha }}

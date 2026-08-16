@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  forqen application icon.
+
+  A commit graph with a branch and a merge — the thing the app is for, drawn at
+  the scale where a 48px icon still reads. Flat shapes and no gradients on
+  purpose: gradients turn to mud below 32px, and the GNOME HIG asks for a
+  distinctive silhouette rather than detail.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3584e4"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+
+  <!-- trunk -->
+  <path d="M46 30 V98" stroke="#ffffff" stroke-width="7" stroke-linecap="round" fill="none"/>
+
+  <!-- branch out and merge back -->
+  <path d="M46 50 C46 38, 82 38, 82 50 V66 C82 78, 46 78, 46 90"
+        stroke="#ffffff" stroke-width="7" stroke-linecap="round"
+        stroke-linejoin="round" fill="none" opacity="0.92"/>
+
+  <!-- commits on the trunk -->
+  <circle cx="46" cy="34" r="9" fill="#ffffff"/>
+  <circle cx="46" cy="64" r="9" fill="#ffffff"/>
+  <circle cx="46" cy="94" r="9" fill="#ffffff"/>
+
+  <!-- commit on the branch -->
+  <circle cx="82" cy="58" r="9" fill="#ffffff" opacity="0.92"/>
+</svg>

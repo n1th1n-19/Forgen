@@ -1,0 +1,38 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Cargo.lock IS committed. This workspace produces a binary, not a library —
+# a reproducible dependency set is the point, and `cargo install --locked`
+# and the Flatpak offline build both depend on it.
+
+# Meson / ninja. `build` is what the README uses; the others are common habits.
+/build
+/_build
+/builddir
+/cargo-target
+
+# Flatpak
+/.flatpak-builder
+*.flatpak
+*.flatpakref
+# `cargo vendor` output for the offline Flathub build — regenerated, never edited.
+/vendor
+cargo-vendor.tar.gz
+
+# Local install prefix from `meson setup --prefix=./install`
+/install
+
+# Tooling session state, not project code.
+/.remember
+
+# Profiling output
+perf.data
+perf.data.old
+*.profraw
+
+# Editor and OS noise. Personal preferences belong in a global gitignore, but
+# these three escape into shared repositories often enough to be worth naming.
+*.swp
+.DS_Store
+/.idea

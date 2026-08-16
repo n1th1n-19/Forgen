@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist gettext-domain="forqen">
+  <schema id="io.github.forqen.Forqen" path="/io/github/forqen/Forqen/">
+
+    <key name="window-width" type="i">
+      <default>1200</default>
+      <summary>Main window width</summary>
+    </key>
+
+    <key name="window-height" type="i">
+      <default>800</default>
+      <summary>Main window height</summary>
+    </key>
+
+    <key name="window-maximized" type="b">
+      <default>false</default>
+      <summary>Main window maximized state</summary>
+    </key>
+
+    <key name="recent-repositories" type="as">
+      <default>[]</default>
+      <summary>Recently opened repository paths</summary>
+      <description>
+        Paths only. Open repositories are never cached as live handles — a
+        cached handle keeps its packfile mappings and object cache alive, which
+        is a leak wearing a convenience feature's clothes.
+      </description>
+    </key>
+
+    <key name="commit-row-budget" type="i">
+      <range min="64" max="8192"/>
+      <default>512</default>
+      <summary>Maximum commit rows held in memory</summary>
+      <description>
+        Rows outside this budget are dropped and re-read on demand. Raising it
+        trades memory for fewer re-reads when scrolling long distances.
+      </description>
+    </key>
+
+    <key name="last-page" type="s">
+      <choices>
+        <choice value="history"/>
+        <choice value="changes"/>
+      </choices>
+      <default>'history'</default>
+      <summary>Page shown at startup</summary>
+      <description>
+        The page that was open when the window last closed, so relaunching
+        lands where the user left off.
+      </description>
+    </key>
+
+    <key name="diff-side-by-side" type="b">
+      <default>false</default>
+      <summary>Show diffs side by side rather than unified</summary>
+    </key>
+
+    <key name="cache-max-age-days" type="i">
+      <range min="0" max="365"/>
+      <default>14</default>
+      <summary>Days to retain cached API responses</summary>
+      <description>
+        Cached responses let the app render real data while offline and let
+        revalidation happen without spending rate limit. Zero disables the cache.
+      </description>
+    </key>
+
+  </schema>
+</schemalist>

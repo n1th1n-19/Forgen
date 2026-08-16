@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = ["crates/git", "crates/auth", "crates/db", "crates/github", "crates/ui", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/n1th1n-19/forqen"
+
+[workspace.dependencies]
+# internal
+git = { path = "crates/git" }
+auth = { path = "crates/auth" }
+github = { path = "crates/github" }
+db = { path = "crates/db" }
+ui = { path = "crates/ui" }
+
+# external — pinned exact on 0.x crates with churn (see plan: gix API churn risk)
+# Default features stay on: disabling them drops gix-hash's hash-kind
+# selection and `gix_hash::Kind` compiles as an empty enum.
+gix = { version = "=0.86.0", features = ["blame", "status"] }
+# No octocrab: conditional requests (If-None-Match / 304) are the core of the
+# API layer, and wrapper crates abstract exactly that away. reqwest directly.
+keyring = "4.1"
+rusqlite = { version = "0.37", features = ["bundled"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rayon = "1"
+
+gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+sourceview = { package = "sourceview5", version = "0.11" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"
+panic = "abort"
+
+# memcheck runs under --release; opt-level 1 in dev keeps gix packfile
+# access from being unusably slow when debugging the UI.
+[profile.dev.package."*"]
+opt-level = 2

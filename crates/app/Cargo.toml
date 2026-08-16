@@ -1,0 +1,23 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "forqen"
+path = "src/main.rs"
+
+[dependencies]
+ui.workspace = true
+db.workspace = true
+
+adw.workspace = true
+gtk.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

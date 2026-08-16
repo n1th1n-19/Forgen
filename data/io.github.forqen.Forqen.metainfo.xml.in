@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.forqen.Forqen</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>forqen</name>
+  <summary>Native GitHub client for Linux</summary>
+
+  <description>
+    <p>
+      forqen is a native desktop git client for Linux that covers both local git
+      work and the parts of GitHub people use daily — pull request review,
+      issues, Actions and notifications — without a browser and without a
+      bundled web engine.
+    </p>
+    <p>Local git:</p>
+    <ul>
+      <li>Browse history in repositories with millions of commits</li>
+      <li>Stage by hunk or by individual line, then commit with GPG or SSH signing</li>
+      <li>Branch, merge, stash, and resolve conflicts in a three-way view</li>
+      <li>Interactive rebase with a drag-to-reorder editor</li>
+      <li>Worktrees, so reviewing a pull request need not disturb current work</li>
+    </ul>
+    <p>GitHub:</p>
+    <ul>
+      <li>Review pull requests with inline comments and suggested changes</li>
+      <li>Issues, labels, milestones and assignees</li>
+      <li>Workflow runs with live log tailing</li>
+      <li>A keyboard-driven notifications inbox</li>
+    </ul>
+    <p>
+      Sign-in uses the OAuth device flow, so no client secret is shipped in the
+      binary, and tokens are stored in the system keyring rather than on disk.
+      GitHub Enterprise Server and multiple accounts are supported.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.forqen.Forqen.desktop</launchable>
+
+  <categories>
+    <category>Development</category>
+    <category>RevisionControl</category>
+  </categories>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-08-16">
+      <description>
+        <p>First release. Repository browsing, history, and GitHub sign-in.</p>
+      </description>
+    </release>
+  </releases>
+</component>
