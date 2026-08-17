@@ -11,6 +11,7 @@ pub mod conflicts;
 pub mod diff_view;
 pub mod login;
 pub mod pulls;
+pub mod review;
 pub mod settings;
 pub mod stash;
 pub mod state;
@@ -50,6 +51,11 @@ pub fn build_window(
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("forqen")
+        // libadwaita warns without these, and a window with no floor can be
+        // dragged to a size where the breakpoints have nothing left to
+        // rearrange. 360x480 is the narrowest the stacked layout still works at.
+        .width_request(360)
+        .height_request(480)
         .build();
 
     // Geometry comes from settings, which also carry the schema's defaults —
@@ -490,6 +496,7 @@ pub fn build_window(
         &push_btn,
         &account_btn,
     );
+    install_page_actions(app, &stack);
 
     {
         let views_ = views.clone();
@@ -581,6 +588,36 @@ fn install_actions(
         if !accels.is_empty() {
             app.set_accels_for_action(&format!("app.{name}"), accels);
         }
+    }
+}
+
+/// One action per page, so every view is reachable from the keyboard.
+///
+/// Switching to a page that is currently hidden — Conflicts outside a merge,
+/// Pull Requests without a GitHub remote — is a no-op rather than an error:
+/// the shortcut simply does nothing, which is what a disabled menu item would
+/// do.
+fn install_page_actions(app: &adw::Application, stack: &adw::ViewStack) {
+    for (i, name) in ["history", "changes", "pulls", "conflicts"]
+        .iter()
+        .enumerate()
+    {
+        let action_name = format!("page-{name}");
+        let action = gtk::gio::SimpleAction::new(&action_name, None);
+        let stack = stack.clone();
+        let target = name.to_string();
+        action.connect_activate(move |_, _| {
+            if let Some(page) = stack.child_by_name(&target) {
+                if stack.page(&page).is_visible() {
+                    stack.set_visible_child_name(&target);
+                }
+            }
+        });
+        app.add_action(&action);
+        app.set_accels_for_action(
+            &format!("app.{action_name}"),
+            &[&format!("<Control>{}", i + 1)],
+        );
     }
 }
 

@@ -19,6 +19,7 @@ use github::pulls::{self, PullFile, PullRequest, PullState};
 use github::Provenance;
 
 use crate::diff_view::DiffView;
+use crate::review::ReviewPanel;
 use crate::state::AppState;
 
 /// The repository a page is bound to, plus how to reach it.
@@ -47,9 +48,14 @@ pub struct PullsView {
     spinner: gtk::Spinner,
     checkout_btn: gtk::Button,
     open_web_btn: gtk::Button,
+    comment_btn: gtk::Button,
+    review: Rc<ReviewPanel>,
     target: RefCell<Option<Target>>,
     selected: Rc<RefCell<Option<PullRequest>>>,
     files: Rc<RefCell<Vec<PullFile>>>,
+    /// Index into `files` currently rendered, so a drafted comment can name
+    /// the path it belongs to.
+    shown_file: std::cell::Cell<usize>,
     on_checkout: Rc<dyn Fn()>,
 }
 
@@ -91,16 +97,24 @@ impl PullsView {
         open_web_btn.set_tooltip_text(Some("Open on GitHub"));
         open_web_btn.set_sensitive(false);
 
+        let comment_btn = gtk::Button::from_icon_name("chat-bubble-text-symbolic");
+        comment_btn.set_tooltip_text(Some("Comment on the selected line"));
+        comment_btn.set_sensitive(false);
+
+        let review = ReviewPanel::new(rt.clone());
+
         let root = build_layout(
             &list,
             &file_list,
             &diff.root,
+            &review.root,
             &title,
             &subtitle,
             &status,
             &spinner,
             &checkout_btn,
             &open_web_btn,
+            &comment_btn,
         );
 
         let view = Rc::new(Self {
@@ -116,9 +130,12 @@ impl PullsView {
             spinner,
             checkout_btn,
             open_web_btn,
+            comment_btn,
+            review,
             target: RefCell::new(None),
             selected: Rc::new(RefCell::new(None)),
             files: Rc::new(RefCell::new(Vec::new())),
+            shown_file: std::cell::Cell::new(0),
             on_checkout,
         });
 
@@ -130,8 +147,83 @@ impl PullsView {
             let this = view.clone();
             view.open_web_btn.connect_clicked(move |_| this.open_web());
         }
+        {
+            let this = view.clone();
+            view.comment_btn
+                .connect_clicked(move |_| this.comment_on_selection());
+        }
+        {
+            // A comment needs a line to anchor to, so the button follows the
+            // diff selection rather than being always live.
+            let this = view.clone();
+            view.diff.connect_selection_changed(move || {
+                this.comment_btn.set_sensitive(this.diff.anchor().is_some());
+            });
+        }
 
         view
+    }
+
+    /// Draft a comment against the line selected in the diff.
+    fn comment_on_selection(self: &Rc<Self>) {
+        let Some((path, line, side)) = self.diff.anchor().map(|a| {
+            (
+                self.files
+                    .borrow()
+                    .get(self.shown_file.get())
+                    .map(|f| f.filename.clone())
+                    .unwrap_or_default(),
+                a.line,
+                a.side,
+            )
+        }) else {
+            return;
+        };
+        if path.is_empty() {
+            return;
+        }
+
+        let dialog = adw::AlertDialog::new(
+            Some(&format!("Comment on {path}:{line}")),
+            Some("Added to your review. Nothing is sent until you submit."),
+        );
+
+        let entry = gtk::TextView::new();
+        entry.set_wrap_mode(gtk::WrapMode::WordChar);
+        entry.set_top_margin(6);
+        entry.set_bottom_margin(6);
+        entry.set_left_margin(6);
+        entry.set_right_margin(6);
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&entry)
+            .height_request(120)
+            .width_request(420)
+            .build();
+        scroll.add_css_class("card");
+        dialog.set_extra_child(Some(&scroll));
+
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("add", "Add comment");
+        dialog.set_response_appearance("add", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("add"));
+
+        let this = self.clone();
+        dialog.connect_response(None, move |_, response| {
+            if response != "add" {
+                return;
+            }
+            let buf = entry.buffer();
+            let body = buf
+                .text(&buf.start_iter(), &buf.end_iter(), false)
+                .to_string();
+            this.review.add_draft(&path, line, side, &body);
+            this.status
+                .set_text(&format!("{} comment(s) drafted", this.review.draft_count()));
+        });
+
+        if let Some(root) = self.root.root().and_downcast::<gtk::Window>() {
+            dialog.present(Some(&root));
+        }
     }
 
     /// Point the page at a repository, or at nothing.
@@ -158,6 +250,8 @@ impl PullsView {
         self.files.borrow_mut().clear();
         self.checkout_btn.set_sensitive(false);
         self.open_web_btn.set_sensitive(false);
+        self.comment_btn.set_sensitive(false);
+        self.review.set_pull(None, None);
     }
 
     /// Fetch the open pull requests.
@@ -264,6 +358,8 @@ impl PullsView {
         ));
         self.checkout_btn.set_sensitive(true);
         self.open_web_btn.set_sensitive(pr.html_url.is_some());
+        self.review
+            .set_pull(self.target.borrow().clone(), Some(pr.number));
 
         let Some(target) = self.target.borrow().clone() else {
             return;
@@ -336,6 +432,7 @@ impl PullsView {
     }
 
     fn show_file(self: &Rc<Self>, index: usize) {
+        self.shown_file.set(index);
         let files = self.files.borrow();
         let Some(file) = files.get(index) else { return };
 
@@ -437,12 +534,14 @@ fn build_layout(
     list: &gtk::ListBox,
     file_list: &gtk::ListBox,
     diff_root: &gtk::Widget,
+    review_root: &gtk::Widget,
     title: &gtk::Label,
     subtitle: &gtk::Label,
     status: &gtk::Label,
     spinner: &gtk::Spinner,
     checkout_btn: &gtk::Button,
     open_web_btn: &gtk::Button,
+    comment_btn: &gtk::Button,
 ) -> gtk::Widget {
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     header.set_margin_start(12);
@@ -457,6 +556,7 @@ fn build_layout(
 
     header.append(&titles);
     header.append(spinner);
+    header.append(comment_btn);
     header.append(open_web_btn);
     header.append(checkout_btn);
 
@@ -476,10 +576,23 @@ fn build_layout(
         .position(160)
         .build();
 
+    // Review sits beside the diff, not under it: reading a change and writing
+    // about it are the same activity, and stacking them means scrolling away
+    // from the code to say anything about it.
+    let with_review = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(&detail)
+        .end_child(review_root)
+        .resize_start_child(true)
+        .shrink_start_child(true)
+        .shrink_end_child(true)
+        .position(560)
+        .build();
+
     let right = gtk::Box::new(gtk::Orientation::Vertical, 0);
     right.append(&header);
     right.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    right.append(&detail);
+    right.append(&with_review);
 
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     footer.set_margin_start(12);

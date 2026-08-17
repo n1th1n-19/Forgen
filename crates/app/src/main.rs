@@ -1,5 +1,7 @@
 //! forqen — a native GitHub client for Linux.
 
+mod cli;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,14 +15,30 @@ use adw::prelude::*;
 /// moving between.
 const CACHE_MAX_AGE: Duration = Duration::from_secs(14 * 24 * 3600);
 
-fn main() -> glib::ExitCode {
+fn main() -> std::process::ExitCode {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+
+    // A subcommand runs without ever opening a display, so this happens before
+    // any GTK setup — sign-in over SSH is one of the cases it exists for.
+    if let Some(command) = cli::Command::parse(&argv) {
+        init_logging();
+        return command.run();
+    }
+
+    gui()
+}
+
+fn init_logging() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "forqen=info,warn".into()),
         )
         .init();
+}
 
+fn gui() -> std::process::ExitCode {
+    init_logging();
     warn_if_allocator_unbounded();
 
     // One runtime for the whole process, shared by every network call. Two
@@ -34,7 +52,7 @@ fn main() -> glib::ExitCode {
         Ok(rt) => rt,
         Err(e) => {
             tracing::error!(error = %e, "could not start the async runtime");
-            return glib::ExitCode::FAILURE;
+            return std::process::ExitCode::FAILURE;
         }
     };
     let handle = runtime.handle().clone();
@@ -59,7 +77,7 @@ fn main() -> glib::ExitCode {
         Err(message) => {
             eprintln!("forqen: {message}");
             eprintln!("usage: forqen [PATH]");
-            return glib::ExitCode::FAILURE;
+            return std::process::ExitCode::FAILURE;
         }
     };
 
@@ -74,7 +92,12 @@ fn main() -> glib::ExitCode {
 
     // GTK parses argv itself and would treat our path argument as an unknown
     // option, so arguments are handled above and GTK is given none.
-    app.run_with_args::<&str>(&[])
+    let code = app.run_with_args::<&str>(&[]);
+    if code == glib::ExitCode::SUCCESS {
+        std::process::ExitCode::SUCCESS
+    } else {
+        std::process::ExitCode::FAILURE
+    }
 }
 
 /// Optional repository path from the command line.
@@ -89,7 +112,11 @@ fn repo_from_args() -> Result<Option<PathBuf>, String> {
 
     match first.to_str() {
         Some("-h") | Some("--help") => {
-            println!("forqen — native GitHub client\n\nusage: forqen [PATH]\n");
+            println!("forqen — native GitHub client\n");
+            println!("usage: forqen [PATH]");
+            println!("       forqen login   [--host HOST]   adopt the gh CLI's token");
+            println!("       forqen logout  <login> [--host HOST]");
+            println!("       forqen accounts\n");
             println!("  PATH   repository to open; defaults to the most recent one");
             std::process::exit(0);
         }

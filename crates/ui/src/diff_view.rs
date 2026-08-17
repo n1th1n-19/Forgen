@@ -21,6 +21,14 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
 use git::diff::{FileDiff, LineKind};
+use github::reviews::DiffSide;
+
+/// Where a review comment attaches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Anchor {
+    pub line: u32,
+    pub side: DiffSide,
+}
 
 /// What a row represents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,6 +301,48 @@ impl DiffView {
         self.selection_mask().is_some()
     }
 
+    /// The line a review comment would attach to, from the current selection.
+    ///
+    /// GitHub anchors a comment with a line number *and a side*: LEFT means the
+    /// pre-image, RIGHT the post-image. A removed line only exists on the left
+    /// and an added line only on the right, so the side is not a preference —
+    /// picking the wrong one is rejected as a line that does not exist.
+    ///
+    /// A context line exists on both; RIGHT is the useful default, since that
+    /// is the file as the change leaves it.
+    ///
+    /// Returns `None` when nothing is selected, or when the selected row is a
+    /// hunk header, which has no line of its own.
+    pub fn anchor(&self) -> Option<Anchor> {
+        let bitset = self.selection.selection();
+
+        for i in 0..self.store.n_items() {
+            if !bitset.contains(i) {
+                continue;
+            }
+            let row = self.store.item(i).and_downcast::<DiffRow>()?;
+            let imp = row.imp();
+            let (old, new) = (imp.old_no.get(), imp.new_no.get());
+
+            return match row.kind() {
+                RowKind::Removed if old >= 0 => Some(Anchor {
+                    line: old as u32,
+                    side: DiffSide::Left,
+                }),
+                RowKind::Added if new >= 0 => Some(Anchor {
+                    line: new as u32,
+                    side: DiffSide::Right,
+                }),
+                RowKind::Context if new >= 0 => Some(Anchor {
+                    line: new as u32,
+                    side: DiffSide::Right,
+                }),
+                _ => None,
+            };
+        }
+        None
+    }
+
     /// Run `f` whenever the selection changes, so buttons can follow it.
     pub fn connect_selection_changed(&self, f: impl Fn() + 'static) {
         self.selection.connect_selection_changed(move |_, _, _| f());
@@ -397,6 +447,39 @@ pub const CSS: &str = "
 mod tests {
     use super::*;
     use git::diff;
+
+    #[test]
+    fn anchor_side_follows_which_image_the_line_exists_in() {
+        // Not a preference: a removed line has no post-image line number, and
+        // an added line has no pre-image one. GitHub rejects the wrong side as
+        // a line that does not exist.
+        let f = diff::parse(
+            "\
+diff --git a/a b/a
+index 1..2 100644
+--- a/a
++++ b/a
+@@ -1,3 +1,3 @@
+ keep
+-old
++new
+",
+        )
+        .remove(0);
+
+        let lines = &f.hunks[0].lines;
+        assert_eq!(lines[1].kind, LineKind::Removed);
+        assert_eq!(lines[1].old_lineno, Some(2));
+        assert_eq!(lines[1].new_lineno, None, "removed lines are LEFT-only");
+
+        assert_eq!(lines[2].kind, LineKind::Added);
+        assert_eq!(lines[2].new_lineno, Some(2));
+        assert_eq!(lines[2].old_lineno, None, "added lines are RIGHT-only");
+
+        // Context exists on both sides; RIGHT is the file as the change leaves it.
+        assert_eq!(lines[0].kind, LineKind::Context);
+        assert!(lines[0].old_lineno.is_some() && lines[0].new_lineno.is_some());
+    }
 
     #[test]
     fn only_changed_lines_are_stageable() {

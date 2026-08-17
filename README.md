@@ -33,7 +33,7 @@ RSS growth exceeds 64MB. Current measurement: **12MB**.
 
 ## Status
 
-R0 and R1 complete, R2 started. 160 tests.
+R0, R1 and R2 complete. 181 tests.
 
 **Engine — all tested against real repositories:**
 windowed history over large repositories · refs · working-tree status ·
@@ -54,10 +54,16 @@ collapses the sidebar and stacks the panes on a narrow window · stash
 browser with per-stash diff preview · keyboard actions exported on the
 session bus · session restore.
 
-**R2 in progress:** a Pull Requests page lists open PRs, shows each one's
-changed files and diffs, and checks one out into a `pr/<n>` branch via the
-`refs/pull/*` refspec — fork-aware, and correct for forks that have since
-been deleted. Inline review comments and merging are not built yet.
+**R2:** a Pull Requests page lists open PRs, shows each one's changed files
+and diffs, drafts inline review comments anchored to a line and side, submits
+them as one review (comment, approve, or request changes), merges, and checks
+a PR out into a `pr/<n>` branch via the `refs/pull/*` refspec — fork-aware,
+and correct for forks that have since been deleted. Review threads come from
+GraphQL, so resolved and outdated state is real rather than inferred.
+
+**CLI:** `forqen login` adopts the `gh` CLI's token, `forqen accounts` lists
+signed-in identities, `forqen logout` removes one. Sign-in without a display
+is the point — a headless machine, or a build with no GitHub App id.
 
 **Not built:** issues, Actions, notifications, interactive rebase, worktrees,
 reflog, search, releases. See `PLAN.md`.
@@ -166,7 +172,7 @@ for the keyring, and git itself is bundled as a module because
 ## Testing
 
 ```bash
-cargo test --workspace                       # 160 tests
+cargo test --workspace                       # 181 tests
 cargo test -p git -p auth -p db -p github    # 149 of them, no display server needed
 cargo test -p git --test memcheck --release  # the memory gate
 cargo test -p auth -- --ignored              # keyring round trip, needs a session bus

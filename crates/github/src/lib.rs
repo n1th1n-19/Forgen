@@ -7,9 +7,11 @@
 //! primary rate limit, so revalidation is the difference between a polled
 //! notifications inbox being free and being impossible.
 
+pub mod graphql;
 pub mod models;
 pub mod pulls;
 pub mod rate_limit;
+pub mod reviews;
 
 use std::sync::{Arc, Mutex};
 
@@ -105,6 +107,31 @@ impl Client {
         *self.limit.lock().expect("rate limit mutex poisoned")
     }
 
+    pub(crate) fn http(&self) -> &reqwest::Client {
+        &self.http
+    }
+
+    pub(crate) fn token(&self) -> &Secret {
+        &self.token
+    }
+
+    /// GraphQL endpoint for this host.
+    ///
+    /// Not `api_base() + "/graphql"`: on Enterprise Server the REST API lives
+    /// under `/api/v3` but GraphQL sits at `/api/graphql`, so deriving one from
+    /// the other produces a 404 that looks like a permissions problem.
+    pub(crate) fn graphql_url(&self) -> String {
+        if self.account.host == auth::DEFAULT_HOST {
+            "https://api.github.com/graphql".into()
+        } else {
+            format!("https://{}/api/graphql", self.account.host)
+        }
+    }
+
+    pub(crate) fn record_limits_pub(&self, headers: &reqwest::header::HeaderMap) {
+        self.record_limits(headers);
+    }
+
     /// GET a JSON resource, revalidating against the cache.
     ///
     /// `path` is relative to the host's API base, e.g. `"/user/repos"`.
@@ -186,6 +213,74 @@ impl Client {
                 }
             }
             status => Err(api_error(status, resp.text().await.unwrap_or_default())),
+        }
+    }
+
+    /// POST a JSON body and discard the response, surfacing API errors.
+    pub(crate) async fn post_no_content(
+        &self,
+        path: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), GhError> {
+        self.write("POST", path, payload).await
+    }
+
+    pub(crate) async fn put_no_content(
+        &self,
+        path: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), GhError> {
+        self.write("PUT", path, payload).await
+    }
+
+    async fn write(
+        &self,
+        method: &str,
+        path: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), GhError> {
+        let url = format!("{}{}", self.account.api_base(), path);
+        let builder = match method {
+            "PUT" => self.http.put(&url),
+            _ => self.http.post(&url),
+        };
+
+        let resp = builder
+            .header("Accept", ACCEPT)
+            .header("X-GitHub-Api-Version", API_VERSION)
+            .bearer_auth(self.token.expose())
+            .json(&payload)
+            .send()
+            .await?;
+
+        self.record_limits(resp.headers());
+
+        let status = resp.status().as_u16();
+        if (200..300).contains(&status) {
+            // A write invalidates whatever the cache holds for this resource.
+            // Leaving a stale entry would show the user their change reverting
+            // on the next read.
+            self.invalidate_prefix(path);
+            return Ok(());
+        }
+
+        match status {
+            401 => Err(GhError::Unauthorized),
+            // 405 on a merge means the pull request is not mergeable; 409 means
+            // the head moved since the page was loaded. Both are actionable and
+            // both come back with a useful message.
+            _ => Err(api_error(status, resp.text().await.unwrap_or_default())),
+        }
+    }
+
+    /// Drop cached entries whose URL starts with the resource being written.
+    fn invalidate_prefix(&self, path: &str) {
+        // Trim to the pull request or repository root so a review write also
+        // clears the list that contains it.
+        let root = path.split("/reviews").next().unwrap_or(path);
+        let url = format!("{}{}", self.account.api_base(), root);
+        if let Err(e) = self.cache.invalidate(&url) {
+            tracing::warn!(error = %e, "could not invalidate cache after write");
         }
     }
 

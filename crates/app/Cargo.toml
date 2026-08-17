@@ -12,7 +12,8 @@ path = "src/main.rs"
 [dependencies]
 ui.workspace = true
 db.workspace = true
-
+auth.workspace = true
+github.workspace = true
 adw.workspace = true
 gtk.workspace = true
 tokio.workspace = true
