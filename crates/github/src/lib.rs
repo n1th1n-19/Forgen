@@ -9,6 +9,7 @@
 
 pub mod graphql;
 pub mod models;
+pub mod notifications;
 pub mod pulls;
 pub mod rate_limit;
 pub mod reviews;
@@ -79,6 +80,7 @@ pub struct Client {
     token: Secret,
     cache: Arc<Db>,
     limit: Mutex<RateLimit>,
+    poll: Mutex<std::time::Duration>,
 }
 
 impl Client {
@@ -96,6 +98,7 @@ impl Client {
             token,
             cache,
             limit: Mutex::new(RateLimit::unknown()),
+            poll: Mutex::new(std::time::Duration::from_secs(60)),
         })
     }
 
@@ -225,6 +228,10 @@ impl Client {
         self.write("POST", path, payload).await
     }
 
+    pub(crate) async fn patch_no_content(&self, path: &str) -> Result<(), GhError> {
+        self.write("PATCH", path, serde_json::Value::Null).await
+    }
+
     pub(crate) async fn put_no_content(
         &self,
         path: &str,
@@ -242,6 +249,7 @@ impl Client {
         let url = format!("{}{}", self.account.api_base(), path);
         let builder = match method {
             "PUT" => self.http.put(&url),
+            "PATCH" => self.http.patch(&url),
             _ => self.http.post(&url),
         };
 
@@ -287,6 +295,16 @@ impl Client {
     fn record_limits(&self, headers: &reqwest::header::HeaderMap) {
         let parsed = RateLimit::from_headers(headers);
         *self.limit.lock().expect("rate limit mutex poisoned") = parsed;
+
+        // Remembered from whatever response carried it, so the inbox can pace
+        // itself to what the server asked for rather than to a constant.
+        *self.poll.lock().expect("poll mutex poisoned") =
+            notifications::parse_poll_interval(headers);
+    }
+
+    /// How long GitHub last asked to wait before polling notifications again.
+    pub fn poll_interval(&self) -> std::time::Duration {
+        *self.poll.lock().expect("poll mutex poisoned")
     }
 }
 

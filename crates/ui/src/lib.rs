@@ -9,6 +9,7 @@ pub mod changes;
 pub mod commit_list;
 pub mod conflicts;
 pub mod diff_view;
+pub mod inbox;
 pub mod login;
 pub mod pulls;
 pub mod review;
@@ -191,6 +192,7 @@ pub fn build_window(
         (view, reload)
     };
     let (pulls_page_view, pulls_reload) = pulls_view;
+    let inbox_view = inbox::InboxView::new(rt.clone());
 
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(&main_pane, Some("history"), "History", "view-list-symbolic");
@@ -222,6 +224,16 @@ pub fn build_window(
     );
     pulls_page.set_visible(false);
 
+    // The inbox is account-wide, not repository-scoped: it appears whenever
+    // someone is signed in, regardless of what repository is open.
+    let inbox_page = stack.add_titled_with_icon(
+        &inbox_view.root,
+        Some("inbox"),
+        "Inbox",
+        "mail-unread-symbolic",
+    );
+    inbox_page.set_visible(false);
+
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
         .policy(adw::ViewSwitcherPolicy::Wide)
@@ -235,6 +247,7 @@ pub fn build_window(
         let changes = changes.clone();
         let conflicts_ = conflicts.clone();
         let pulls_ = pulls_page_view.clone();
+        let inbox_ = inbox_view.clone();
         let prefs = prefs.clone();
         stack.connect_visible_child_name_notify(move |s| {
             let Some(name) = s.visible_child_name() else {
@@ -249,9 +262,17 @@ pub fn build_window(
             if name == "pulls" {
                 pulls_.refresh();
             }
+            // Polling only runs while the page is being looked at. A background
+            // tab quietly spending rate limit is the thing conditional requests
+            // were supposed to avoid, not license to poll forever.
+            if name == "inbox" {
+                inbox_.start();
+            } else {
+                inbox_.stop();
+            }
             // Only the permanent pages are worth restoring — a Conflicts page
             // saved here would be gone by the next launch.
-            if name != "conflicts" && name != "pulls" {
+            if name != "conflicts" && name != "pulls" && name != "inbox" {
                 if let Some(p) = &prefs {
                     p.set_string("last-page", &name).ok();
                 }
@@ -350,6 +371,8 @@ pub fn build_window(
         conflicts: conflicts.clone(),
         pulls_page: pulls_page.clone(),
         pulls: pulls_page_view.clone(),
+        inbox_page: inbox_page.clone(),
+        inbox: inbox_view.clone(),
     };
 
     {
@@ -598,7 +621,7 @@ fn install_actions(
 /// the shortcut simply does nothing, which is what a disabled menu item would
 /// do.
 fn install_page_actions(app: &adw::Application, stack: &adw::ViewStack) {
-    for (i, name) in ["history", "changes", "pulls", "conflicts"]
+    for (i, name) in ["history", "changes", "pulls", "inbox", "conflicts"]
         .iter()
         .enumerate()
     {
@@ -658,6 +681,8 @@ struct Views {
     conflicts: Rc<conflicts::ConflictView>,
     pulls_page: adw::ViewStackPage,
     pulls: Rc<pulls::PullsView>,
+    inbox_page: adw::ViewStackPage,
+    inbox: Rc<inbox::InboxView>,
 }
 
 impl Views {
@@ -694,8 +719,20 @@ impl Views {
         });
 
         let available = target.is_some();
-        self.pulls.set_target(target);
+        self.pulls.set_target(target.clone());
         self.pulls_page.set_visible(available);
+
+        // The inbox needs only an account, not a GitHub remote — it is shown
+        // whenever there is a client to ask, even in a repository hosted
+        // somewhere else entirely.
+        let client = github_client().map(|c| pulls::Target {
+            owner: String::new(),
+            repo: String::new(),
+            client: c,
+        });
+        let signed_in = client.is_some();
+        self.inbox.set_client(client);
+        self.inbox_page.set_visible(signed_in);
 
         if !available && self.stack.visible_child_name().as_deref() == Some("pulls") {
             self.stack.set_visible_child_name("history");

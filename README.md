@@ -33,7 +33,7 @@ RSS growth exceeds 64MB. Current measurement: **12MB**.
 
 ## Status
 
-R0, R1 and R2 complete. 181 tests.
+R0, R1 and R2 complete, R3 started. 192 tests.
 
 **Engine — all tested against real repositories:**
 windowed history over large repositories · refs · working-tree status ·
@@ -65,8 +65,14 @@ GraphQL, so resolved and outdated state is real rather than inferred.
 signed-in identities, `forqen logout` removes one. Sign-in without a display
 is the point — a headless machine, or a build with no GitHub App id.
 
-**Not built:** issues, Actions, notifications, interactive rebase, worktrees,
-reflog, search, releases. See `PLAN.md`.
+**R3, started:** a notifications inbox, polled with conditional requests so a
+minute-by-minute refresh costs almost no rate limit, honouring GitHub's
+`X-Poll-Interval` and polling only while the page is open. Review requests and
+mentions sort above watched-repository noise; `e` marks read and `u`
+unsubscribes.
+
+**Not built:** issues, Actions, interactive rebase, worktrees, reflog, search,
+releases. See `PLAN.md`.
 
 **Needs setup before browser sign-in works:** the binary ships a placeholder
 GitHub App id. Register an App and rebuild with `FORQEN_CLIENT_ID=<id>`, or use
@@ -172,7 +178,7 @@ for the keyring, and git itself is bundled as a module because
 ## Testing
 
 ```bash
-cargo test --workspace                       # 181 tests
+cargo test --workspace                       # 192 tests
 cargo test -p git -p auth -p db -p github    # 149 of them, no display server needed
 cargo test -p git --test memcheck --release  # the memory gate
 cargo test -p auth -- --ignored              # keyring round trip, needs a session bus
