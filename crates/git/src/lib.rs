@@ -17,6 +17,7 @@ pub mod commit;
 pub mod diff;
 pub mod history;
 pub mod merge;
+pub mod rebase;
 pub mod refs;
 pub mod remote;
 pub mod repo;
