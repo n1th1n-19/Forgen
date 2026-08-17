@@ -7,6 +7,7 @@
 //! primary rate limit, so revalidation is the difference between a polled
 //! notifications inbox being free and being impossible.
 
+pub mod actions;
 pub mod graphql;
 pub mod issues;
 pub mod models;
@@ -117,6 +118,15 @@ impl Client {
 
     pub(crate) fn token(&self) -> &Secret {
         &self.token
+    }
+
+    /// Exposed for the log path, which builds its own non-redirecting client.
+    pub(crate) fn token_pub(&self) -> &Secret {
+        &self.token
+    }
+
+    pub(crate) fn api_base_pub(&self) -> String {
+        self.account.api_base()
     }
 
     /// GraphQL endpoint for this host.

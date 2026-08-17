@@ -5,6 +5,7 @@
 //! [`commit_list::row_factory`]); network work is handed to a tokio runtime and
 //! returns over an `async_channel`.
 
+pub mod actions;
 pub mod changes;
 pub mod commit_list;
 pub mod conflicts;
@@ -195,6 +196,7 @@ pub fn build_window(
     let (pulls_page_view, pulls_reload) = pulls_view;
     let inbox_view = inbox::InboxView::new(rt.clone());
     let issues_view = issues::IssuesView::new(rt.clone());
+    let actions_view = actions::ActionsView::new(rt.clone());
 
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(&main_pane, Some("history"), "History", "view-list-symbolic");
@@ -244,6 +246,14 @@ pub fn build_window(
     );
     issues_page.set_visible(false);
 
+    let actions_page = stack.add_titled_with_icon(
+        &actions_view.root,
+        Some("actions"),
+        "Actions",
+        "media-playback-start-symbolic",
+    );
+    actions_page.set_visible(false);
+
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
         .policy(adw::ViewSwitcherPolicy::Wide)
@@ -259,6 +269,7 @@ pub fn build_window(
         let pulls_ = pulls_page_view.clone();
         let inbox_ = inbox_view.clone();
         let issues_ = issues_view.clone();
+        let actions_ = actions_view.clone();
         let prefs = prefs.clone();
         stack.connect_visible_child_name_notify(move |s| {
             let Some(name) = s.visible_child_name() else {
@@ -284,9 +295,15 @@ pub fn build_window(
             if name == "issues" {
                 issues_.refresh();
             }
+            if name == "actions" {
+                actions_.refresh();
+            }
             // Only the permanent pages are worth restoring — a Conflicts page
             // saved here would be gone by the next launch.
-            if !matches!(name.as_str(), "conflicts" | "pulls" | "inbox" | "issues") {
+            if !matches!(
+                name.as_str(),
+                "conflicts" | "pulls" | "inbox" | "issues" | "actions"
+            ) {
                 if let Some(p) = &prefs {
                     p.set_string("last-page", &name).ok();
                 }
@@ -389,6 +406,8 @@ pub fn build_window(
         inbox: inbox_view.clone(),
         issues_page: issues_page.clone(),
         issues: issues_view.clone(),
+        actions_page: actions_page.clone(),
+        actions: actions_view.clone(),
     };
 
     {
@@ -642,6 +661,7 @@ fn install_page_actions(app: &adw::Application, stack: &adw::ViewStack) {
         "changes",
         "pulls",
         "issues",
+        "actions",
         "inbox",
         "conflicts",
     ]
@@ -708,6 +728,8 @@ struct Views {
     inbox: Rc<inbox::InboxView>,
     issues_page: adw::ViewStackPage,
     issues: Rc<issues::IssuesView>,
+    actions_page: adw::ViewStackPage,
+    actions: Rc<actions::ActionsView>,
 }
 
 impl Views {
@@ -750,6 +772,8 @@ impl Views {
         // account.
         self.issues.set_target(target.clone());
         self.issues_page.set_visible(available);
+        self.actions.set_target(target.clone());
+        self.actions_page.set_visible(available);
 
         // The inbox needs only an account, not a GitHub remote — it is shown
         // whenever there is a client to ask, even in a repository hosted

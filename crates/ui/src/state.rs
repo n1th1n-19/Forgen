@@ -52,11 +52,14 @@ impl RepoState {
 
     /// Repository name and current branch, for the sidebar header.
     pub fn name_and_branch(&self) -> (String, String) {
+        // Canonicalise first: `forqen .` gives a workdir of "." whose
+        // file_name is None, so the title fell back to the literal word
+        // "repository" for the most ordinary invocation there is.
         let name = self
             .repo
             .workdir()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()))
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .unwrap_or_else(|| "repository".into());
         let branch = self
             .repo
