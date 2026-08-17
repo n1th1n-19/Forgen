@@ -8,6 +8,7 @@
 //! notifications inbox being free and being impossible.
 
 pub mod graphql;
+pub mod issues;
 pub mod models;
 pub mod notifications;
 pub mod pulls;
@@ -230,6 +231,14 @@ impl Client {
 
     pub(crate) async fn patch_no_content(&self, path: &str) -> Result<(), GhError> {
         self.write("PATCH", path, serde_json::Value::Null).await
+    }
+
+    pub(crate) async fn patch_json(
+        &self,
+        path: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), GhError> {
+        self.write("PATCH", path, payload).await
     }
 
     pub(crate) async fn put_no_content(

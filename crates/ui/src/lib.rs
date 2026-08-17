@@ -10,6 +10,7 @@ pub mod commit_list;
 pub mod conflicts;
 pub mod diff_view;
 pub mod inbox;
+pub mod issues;
 pub mod login;
 pub mod pulls;
 pub mod review;
@@ -193,6 +194,7 @@ pub fn build_window(
     };
     let (pulls_page_view, pulls_reload) = pulls_view;
     let inbox_view = inbox::InboxView::new(rt.clone());
+    let issues_view = issues::IssuesView::new(rt.clone());
 
     let stack = adw::ViewStack::new();
     stack.add_titled_with_icon(&main_pane, Some("history"), "History", "view-list-symbolic");
@@ -234,6 +236,14 @@ pub fn build_window(
     );
     inbox_page.set_visible(false);
 
+    let issues_page = stack.add_titled_with_icon(
+        &issues_view.root,
+        Some("issues"),
+        "Issues",
+        "dialog-question-symbolic",
+    );
+    issues_page.set_visible(false);
+
     let switcher = adw::ViewSwitcher::builder()
         .stack(&stack)
         .policy(adw::ViewSwitcherPolicy::Wide)
@@ -248,6 +258,7 @@ pub fn build_window(
         let conflicts_ = conflicts.clone();
         let pulls_ = pulls_page_view.clone();
         let inbox_ = inbox_view.clone();
+        let issues_ = issues_view.clone();
         let prefs = prefs.clone();
         stack.connect_visible_child_name_notify(move |s| {
             let Some(name) = s.visible_child_name() else {
@@ -270,9 +281,12 @@ pub fn build_window(
             } else {
                 inbox_.stop();
             }
+            if name == "issues" {
+                issues_.refresh();
+            }
             // Only the permanent pages are worth restoring — a Conflicts page
             // saved here would be gone by the next launch.
-            if name != "conflicts" && name != "pulls" && name != "inbox" {
+            if !matches!(name.as_str(), "conflicts" | "pulls" | "inbox" | "issues") {
                 if let Some(p) = &prefs {
                     p.set_string("last-page", &name).ok();
                 }
@@ -373,6 +387,8 @@ pub fn build_window(
         pulls: pulls_page_view.clone(),
         inbox_page: inbox_page.clone(),
         inbox: inbox_view.clone(),
+        issues_page: issues_page.clone(),
+        issues: issues_view.clone(),
     };
 
     {
@@ -621,9 +637,16 @@ fn install_actions(
 /// the shortcut simply does nothing, which is what a disabled menu item would
 /// do.
 fn install_page_actions(app: &adw::Application, stack: &adw::ViewStack) {
-    for (i, name) in ["history", "changes", "pulls", "inbox", "conflicts"]
-        .iter()
-        .enumerate()
+    for (i, name) in [
+        "history",
+        "changes",
+        "pulls",
+        "issues",
+        "inbox",
+        "conflicts",
+    ]
+    .iter()
+    .enumerate()
     {
         let action_name = format!("page-{name}");
         let action = gtk::gio::SimpleAction::new(&action_name, None);
@@ -683,6 +706,8 @@ struct Views {
     pulls: Rc<pulls::PullsView>,
     inbox_page: adw::ViewStackPage,
     inbox: Rc<inbox::InboxView>,
+    issues_page: adw::ViewStackPage,
+    issues: Rc<issues::IssuesView>,
 }
 
 impl Views {
@@ -721,6 +746,10 @@ impl Views {
         let available = target.is_some();
         self.pulls.set_target(target.clone());
         self.pulls_page.set_visible(available);
+        // Issues need the same thing pull requests do: a GitHub remote and an
+        // account.
+        self.issues.set_target(target.clone());
+        self.issues_page.set_visible(available);
 
         // The inbox needs only an account, not a GitHub remote — it is shown
         // whenever there is a client to ask, even in a repository hosted

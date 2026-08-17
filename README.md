@@ -33,7 +33,7 @@ RSS growth exceeds 64MB. Current measurement: **12MB**.
 
 ## Status
 
-R0, R1 and R2 complete, R3 started. 192 tests.
+R0, R1 and R2 complete, R3 nearly. 198 tests.
 
 **Engine — all tested against real repositories:**
 windowed history over large repositories · refs · working-tree status ·
@@ -71,7 +71,11 @@ minute-by-minute refresh costs almost no rate limit, honouring GitHub's
 mentions sort above watched-repository noise; `e` marks read and `u`
 unsubscribes.
 
-**Not built:** issues, Actions, interactive rebase, worktrees, reflog, search,
+Issues list, read, comment on, close and reopen. Pull requests are filtered
+out of the issues list — GitHub's issues endpoint returns them too, and a
+client that forgets shows every open PR twice.
+
+**Not built:** Actions, interactive rebase, worktrees, reflog, search,
 releases. See `PLAN.md`.
 
 **Needs setup before browser sign-in works:** the binary ships a placeholder
@@ -178,7 +182,7 @@ for the keyring, and git itself is bundled as a module because
 ## Testing
 
 ```bash
-cargo test --workspace                       # 192 tests
+cargo test --workspace                       # 198 tests
 cargo test -p git -p auth -p db -p github    # 149 of them, no display server needed
 cargo test -p git --test memcheck --release  # the memory gate
 cargo test -p auth -- --ignored              # keyring round trip, needs a session bus
